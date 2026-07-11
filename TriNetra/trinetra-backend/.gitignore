@@ -1,0 +1,40 @@
+# ==========================================
+# TriNetra FastAPI Backend
+# ==========================================
+
+# Python Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env_venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs and Databases
+*.log
+*.sqlite3
+*.db
+
+# Environment Variables / Secrets
+.env
+.env.local
+.secret
+
+# OS & IDE Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Zoho Catalyst Local CLI (just in case)
+.catalyst/
+catalyst-debug.log
+catalyst-error.log
