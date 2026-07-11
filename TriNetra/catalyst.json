@@ -1,0 +1,12 @@
+{
+  "client": {
+    "source": "trinetra-client",
+    "plugin": "zcatalyst-cli-plugin-react"
+  },
+  "appsail": [
+    {
+      "source": "appsail-python",
+      "name": "trinetra-api"
+    }
+  ]
+}
