@@ -1,0 +1,1 @@
+CrimeNo,CaseNo,CrimeRegisteredDate,PolicePersonID,PoliceStationID,CaseCategoryID,GravityOffenceID,CrimeMajorHeadID,CrimeMinorHeadID,CaseStatusID,CourtID,IncidentFromDate,IncidentToDate,InfoReceivedPSDate,latitude,longitude,BriefFacts
