@@ -6,3 +6,4 @@ pydantic
 psycopg2-binary
 google-generativeai
 groq
+google-genai
