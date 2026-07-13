@@ -1,1 +1,8 @@
-ReligionName
+ReligionID,ReligionName
+1,Hindu
+2,Muslim
+3,Christian
+4,Sikh
+5,Jain
+6,Buddhist
+7,Other

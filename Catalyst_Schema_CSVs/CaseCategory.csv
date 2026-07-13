@@ -1,1 +1,5 @@
-LookupValue
+CaseCategoryID,LookupValue
+1,FIR
+2,UDR
+3,Zero FIR
+4,PAR

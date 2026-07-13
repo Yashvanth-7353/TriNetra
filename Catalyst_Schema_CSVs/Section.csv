@@ -1,1 +1,25 @@
 ActCode,SectionCode,SectionDescription,Active
+IPC,302,Murder,1
+IPC,307,Attempt to murder,1
+IPC,326,Grievous hurt,1
+IPC,323,Assault,1
+IPC,363,Kidnapping,1
+IPC,379,Theft,1
+IPC,457,Burglary,1
+IPC,392,Robbery,1
+IPC,395,Dacoity,1
+IPC,420,Cheating,1
+IPC,406,Criminal breach of trust,1
+IPC,489A,Counterfeit currency,1
+IPC,498A,Domestic cruelty,1
+IPC,354,Molestation,1
+IPC,376,Rape,1
+IPC,147,Rioting,1
+IPC,143,Unlawful assembly,1
+IPC,411,Stolen property,1
+NDPS,20,Possession of narcotics,1
+NDPS,23,Trafficking narcotics,1
+POCSO,4,Penetrative sexual assault on child,1
+ITACT,66C,Identity theft,1
+ITACT,66D,Cheating by personation using computer,1
+ARMS,25,Illegal possession of firearm,1

@@ -1,1 +1,6 @@
-UnitTypeName,CityDistState,Hierarchy,Active
+UnitTypeID,UnitTypeName,CityDistState,Hierarchy,Active
+1,Police Station,City,3,1
+2,Rural Police Station,District,3,1
+3,Circle Office,District,2,1
+4,SP Office,District,1,1
+5,Commissionerate,City,1,1

@@ -1,1 +1,127 @@
-UnitName,TypeID,ParentUnit,NationalityID,StateID,DistrictID,Active
+UnitID,UnitName,TypeID,ParentUnit,StateID,DistrictID,Active
+1,Bagalkot North PS 1,1,,1,1,1
+2,Bagalkot Central PS 2,1,,1,1,1
+3,Bagalkot West PS 3,1,,1,1,1
+4,Ballari East PS 1,1,,1,2,1
+5,Ballari East PS 2,1,,1,2,1
+6,Ballari South PS 3,1,,1,2,1
+7,Ballari North PS 4,1,,1,2,1
+8,Ballari Old Town PS 5,1,,1,2,1
+9,Ballari North PS 6,1,,1,2,1
+10,Belagavi New Extension PS 1,1,,1,3,1
+11,Belagavi Station Road PS 2,1,,1,3,1
+12,Belagavi Central PS 3,1,,1,3,1
+13,Belagavi Central PS 4,1,,1,3,1
+14,Belagavi North PS 5,1,,1,3,1
+15,Belagavi East PS 6,1,,1,3,1
+16,Bengaluru Rural East PS 1,1,,1,4,1
+17,Bengaluru Rural Old Town PS 2,1,,1,4,1
+18,Bengaluru Rural New Extension PS 3,1,,1,4,1
+19,Bengaluru Urban Central PS 1,1,,1,5,1
+20,Bengaluru Urban Old Town PS 2,1,,1,5,1
+21,Bengaluru Urban East PS 3,1,,1,5,1
+22,Bengaluru Urban Old Town PS 4,1,,1,5,1
+23,Bengaluru Urban Station Road PS 5,1,,1,5,1
+24,Bengaluru Urban East PS 6,1,,1,5,1
+25,Bengaluru Urban Ring Road PS 7,1,,1,5,1
+26,Bengaluru Urban New Extension PS 8,1,,1,5,1
+27,Bengaluru Urban West PS 9,1,,1,5,1
+28,Bengaluru Urban Central PS 10,1,,1,5,1
+29,Bengaluru Urban South PS 11,1,,1,5,1
+30,Bengaluru Urban Station Road PS 12,1,,1,5,1
+31,Bidar Market PS 1,1,,1,6,1
+32,Bidar West PS 2,1,,1,6,1
+33,Bidar South PS 3,1,,1,6,1
+34,Chamarajanagar East PS 1,1,,1,7,1
+35,Chamarajanagar Market PS 2,1,,1,7,1
+36,Chamarajanagar North PS 3,1,,1,7,1
+37,Chikkaballapur North PS 1,1,,1,8,1
+38,Chikkaballapur Station Road PS 2,1,,1,8,1
+39,Chikkaballapur North PS 3,1,,1,8,1
+40,Chikkamagaluru Market PS 1,1,,1,9,1
+41,Chikkamagaluru Market PS 2,1,,1,9,1
+42,Chikkamagaluru New Extension PS 3,1,,1,9,1
+43,Chitradurga West PS 1,1,,1,10,1
+44,Chitradurga Central PS 2,1,,1,10,1
+45,Chitradurga Ring Road PS 3,1,,1,10,1
+46,Dakshina Kannada Old Town PS 1,1,,1,11,1
+47,Dakshina Kannada North PS 2,1,,1,11,1
+48,Dakshina Kannada Station Road PS 3,1,,1,11,1
+49,Dakshina Kannada North PS 4,1,,1,11,1
+50,Dakshina Kannada Old Town PS 5,1,,1,11,1
+51,Dakshina Kannada West PS 6,1,,1,11,1
+52,Davanagere New Extension PS 1,1,,1,12,1
+53,Davanagere Market PS 2,1,,1,12,1
+54,Davanagere New Extension PS 3,1,,1,12,1
+55,Davanagere East PS 4,1,,1,12,1
+56,Davanagere North PS 5,1,,1,12,1
+57,Davanagere Central PS 6,1,,1,12,1
+58,Dharwad East PS 1,1,,1,13,1
+59,Dharwad West PS 2,1,,1,13,1
+60,Dharwad North PS 3,1,,1,13,1
+61,Dharwad East PS 4,1,,1,13,1
+62,Dharwad North PS 5,1,,1,13,1
+63,Dharwad Station Road PS 6,1,,1,13,1
+64,Gadag West PS 1,1,,1,14,1
+65,Gadag Ring Road PS 2,1,,1,14,1
+66,Gadag Market PS 3,1,,1,14,1
+67,Hassan South PS 1,1,,1,15,1
+68,Hassan Market PS 2,1,,1,15,1
+69,Hassan Market PS 3,1,,1,15,1
+70,Haveri East PS 1,1,,1,16,1
+71,Haveri West PS 2,1,,1,16,1
+72,Haveri North PS 3,1,,1,16,1
+73,Kalaburagi New Extension PS 1,1,,1,17,1
+74,Kalaburagi South PS 2,1,,1,17,1
+75,Kalaburagi Old Town PS 3,1,,1,17,1
+76,Kalaburagi East PS 4,1,,1,17,1
+77,Kalaburagi South PS 5,1,,1,17,1
+78,Kalaburagi Ring Road PS 6,1,,1,17,1
+79,Kodagu Station Road PS 1,1,,1,18,1
+80,Kodagu West PS 2,1,,1,18,1
+81,Kodagu Old Town PS 3,1,,1,18,1
+82,Kolar East PS 1,1,,1,19,1
+83,Kolar Market PS 2,1,,1,19,1
+84,Kolar Central PS 3,1,,1,19,1
+85,Koppal East PS 1,1,,1,20,1
+86,Koppal Central PS 2,1,,1,20,1
+87,Koppal Market PS 3,1,,1,20,1
+88,Mandya Station Road PS 1,1,,1,21,1
+89,Mandya West PS 2,1,,1,21,1
+90,Mandya North PS 3,1,,1,21,1
+91,Mysuru East PS 1,1,,1,22,1
+92,Mysuru New Extension PS 2,1,,1,22,1
+93,Mysuru Market PS 3,1,,1,22,1
+94,Mysuru East PS 4,1,,1,22,1
+95,Mysuru Ring Road PS 5,1,,1,22,1
+96,Mysuru Station Road PS 6,1,,1,22,1
+97,Raichur Ring Road PS 1,1,,1,23,1
+98,Raichur South PS 2,1,,1,23,1
+99,Raichur West PS 3,1,,1,23,1
+100,Ramanagara South PS 1,1,,1,24,1
+101,Ramanagara East PS 2,1,,1,24,1
+102,Ramanagara Old Town PS 3,1,,1,24,1
+103,Shivamogga Old Town PS 1,1,,1,25,1
+104,Shivamogga West PS 2,1,,1,25,1
+105,Shivamogga New Extension PS 3,1,,1,25,1
+106,Tumakuru Station Road PS 1,1,,1,26,1
+107,Tumakuru New Extension PS 2,1,,1,26,1
+108,Tumakuru Station Road PS 3,1,,1,26,1
+109,Tumakuru Market PS 4,1,,1,26,1
+110,Tumakuru East PS 5,1,,1,26,1
+111,Tumakuru South PS 6,1,,1,26,1
+112,Udupi Old Town PS 1,1,,1,27,1
+113,Udupi Ring Road PS 2,1,,1,27,1
+114,Udupi North PS 3,1,,1,27,1
+115,Uttara Kannada Central PS 1,1,,1,28,1
+116,Uttara Kannada North PS 2,1,,1,28,1
+117,Uttara Kannada South PS 3,1,,1,28,1
+118,Vijayapura South PS 1,1,,1,29,1
+119,Vijayapura Station Road PS 2,1,,1,29,1
+120,Vijayapura New Extension PS 3,1,,1,29,1
+121,Yadgir North PS 1,1,,1,30,1
+122,Yadgir Station Road PS 2,1,,1,30,1
+123,Yadgir Station Road PS 3,1,,1,30,1
+124,Vijayanagara New Extension PS 1,1,,1,31,1
+125,Vijayanagara Ring Road PS 2,1,,1,31,1
+126,Vijayanagara Old Town PS 3,1,,1,31,1

@@ -1,1 +1,29 @@
-CrimeHeadID,CrimeHeadName,SeqID
+CrimeSubHeadID,CrimeHeadID,CrimeHeadName,SeqID
+1,1,Murder,1
+2,1,Attempt to Murder,2
+3,1,Grievous Hurt,3
+4,1,Assault,4
+5,1,Kidnapping,5
+6,2,Theft,1
+7,2,Burglary,2
+8,2,Robbery,3
+9,2,Dacoity,4
+10,2,Chain Snatching,5
+11,2,Motor Vehicle Theft,6
+12,3,Cheating/Fraud,1
+13,3,Criminal Breach of Trust,2
+14,3,Counterfeit Currency,3
+15,4,Domestic Violence,1
+16,4,Dowry Harassment,2
+17,4,Molestation,3
+18,4,Rape/POCSO,4
+19,5,NDPS - Possession,1
+20,5,NDPS - Trafficking,2
+21,6,Rioting,1
+22,6,Unlawful Assembly,2
+23,7,Online Financial Fraud,1
+24,7,Identity Theft,2
+25,7,Cyberstalking,3
+26,7,OTP/Digital Arrest Scam,4
+27,8,Missing Person,1
+28,8,Unnatural Death (UDR),2

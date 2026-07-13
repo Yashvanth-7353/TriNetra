@@ -1,1 +1,18 @@
-MOTagName,MOCategory
+MOTagID,MOTagName,MOCategory
+1,Forced entry via window,Property
+2,Two-wheeler chain snatching,Property
+3,Vehicle lifted from parking,Property
+4,Phishing call - bank impersonation,Cyber
+5,OTP fraud,Cyber
+6,Digital arrest scam,Cyber
+7,Loan app harassment,Cyber
+8,Fake job offer fraud,Cyber
+9,Interstate vehicle theft ring,Organized
+10,ATM skimming device,Organized
+11,Habitual pickpocket - bus stand,Property
+12,Domestic dispute escalation,Violent
+13,Group assault - public place,Violent
+14,Narcotics courier - bus route,Narcotics
+15,Local peddling - college area,Narcotics
+16,Property dispute triggered assault,Violent
+17,Online matrimonial fraud,Cyber

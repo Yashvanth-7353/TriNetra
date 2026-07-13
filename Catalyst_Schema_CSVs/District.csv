@@ -1,1 +1,32 @@
-DistrictName,StateID,Active
+DistrictID,DistrictName,StateID,Active,CenterLat,CenterLng
+1,Bagalkot,1,1,16.18,75.7
+2,Ballari,1,1,15.14,76.92
+3,Belagavi,1,1,15.85,74.5
+4,Bengaluru Rural,1,1,13.24,77.48
+5,Bengaluru Urban,1,1,12.97,77.59
+6,Bidar,1,1,17.91,77.52
+7,Chamarajanagar,1,1,11.92,76.94
+8,Chikkaballapur,1,1,13.43,77.73
+9,Chikkamagaluru,1,1,13.32,75.77
+10,Chitradurga,1,1,14.23,76.4
+11,Dakshina Kannada,1,1,12.87,74.88
+12,Davanagere,1,1,14.46,75.92
+13,Dharwad,1,1,15.46,75.0
+14,Gadag,1,1,15.43,75.63
+15,Hassan,1,1,13.0,76.1
+16,Haveri,1,1,14.79,75.4
+17,Kalaburagi,1,1,17.33,76.83
+18,Kodagu,1,1,12.42,75.74
+19,Kolar,1,1,13.14,78.13
+20,Koppal,1,1,15.35,76.15
+21,Mandya,1,1,12.52,76.9
+22,Mysuru,1,1,12.3,76.64
+23,Raichur,1,1,16.21,77.35
+24,Ramanagara,1,1,12.72,77.28
+25,Shivamogga,1,1,13.93,75.57
+26,Tumakuru,1,1,13.34,77.1
+27,Udupi,1,1,13.34,74.75
+28,Uttara Kannada,1,1,14.8,74.7
+29,Vijayapura,1,1,16.83,75.71
+30,Yadgir,1,1,16.77,77.13
+31,Vijayanagara,1,1,15.23,76.46

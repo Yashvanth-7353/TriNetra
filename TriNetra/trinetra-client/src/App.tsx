@@ -1,122 +1,122 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import React, { useState } from 'react';
+import { sendChatQuery } from './services/api';
+import './App.css'; // We will add some basic styling next
 
-function App() {
-  const [count, setCount] = useState(0)
-
-  return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+// Type definitions for our Backend Response
+interface ExecutionStep {
+  step: number;
+  action: string;
+  detail: string;
 }
 
-export default App
+interface Message {
+  sender: 'user' | 'system';
+  text: string;
+  intent?: string;
+  trace?: ExecutionStep[];
+}
+
+function App() {
+  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [activeTrace, setActiveTrace] = useState<ExecutionStep[] | null>(null);
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+
+    // Add user message to screen
+    const userMsg: Message = { sender: 'user', text: input };
+    setMessages(prev => [...prev, userMsg]);
+    setInput('');
+    setLoading(true);
+
+    try {
+      // Call FastAPI Backend
+      const response = await sendChatQuery(userMsg.text);
+      
+      // Parse response and add to screen
+      const systemMsg: Message = {
+        sender: 'system',
+        text: response.answer,
+        intent: response.intent_detected,
+        trace: response.reasoning_trace?.execution_steps
+      };
+      
+      setMessages(prev => [...prev, systemMsg]);
+      
+      // Update the Explainability Panel
+      if (systemMsg.trace) {
+        setActiveTrace(systemMsg.trace);
+      }
+
+    } catch (error) {
+      setMessages(prev => [...prev, { sender: 'system', text: "Error connecting to TriNetra Core." }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="trinetra-layout">
+      {/* LEFT PANEL: Chat Interface */}
+      <div className="chat-container">
+        <header className="chat-header">
+          <h2>TriNetra Copilot (नेत्र)</h2>
+          <span className="badge">Secured Law Enforcement Node</span>
+        </header>
+
+        <div className="messages-area">
+          {messages.length === 0 && (
+            <div className="empty-state">Ask a question to begin investigation...</div>
+          )}
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`message ${msg.sender}`}>
+              <div className="message-bubble">
+                <p>{msg.text}</p>
+                {msg.intent && <span className="intent-tag">Engine: {msg.intent}</span>}
+              </div>
+            </div>
+          ))}
+          {loading && <div className="loading">Processing query parameters...</div>}
+        </div>
+
+        <form className="input-area" onSubmit={handleSend}>
+          <input 
+            type="text" 
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Type your query in English or Kannada..." 
+            autoFocus
+          />
+          <button type="submit" disabled={loading}>Send</button>
+        </form>
+      </div>
+
+      {/* RIGHT PANEL: Explainable AI (Pillar 9) */}
+      <div className="trace-container">
+        <h3>Reasoning Trace</h3>
+        <p className="trace-subtitle">Execution Pipeline & Evidence</p>
+        
+        {activeTrace ? (
+          <div className="trace-steps">
+            {activeTrace.map(step => (
+              <div key={step.step} className="step-card">
+                <div className="step-number">{step.step}</div>
+                <div className="step-details">
+                  <h4>{step.action}</h4>
+                  <p>{step.detail}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-trace">No active reasoning trace.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default App;

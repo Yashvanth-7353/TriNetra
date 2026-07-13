@@ -1,1 +1,9 @@
-CaseStatusName
+CaseStatusID,CaseStatusName
+1,FIR Registered
+2,Under Investigation
+3,Charge Sheeted
+4,Pending Trial
+5,Closed - Convicted
+6,Closed - Acquitted
+7,Closed - False Case
+8,Closed - Undetected

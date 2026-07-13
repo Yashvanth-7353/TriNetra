@@ -1,1 +1,63 @@
-CourtName,DistrictID,StateID,Active
+CourtID,CourtName,DistrictID,StateID,Active
+1,Bagalkot District & Sessions Court,1,1,1
+2,Bagalkot JMFC Court,1,1,1
+3,Ballari District & Sessions Court,2,1,1
+4,Ballari JMFC Court,2,1,1
+5,Belagavi District & Sessions Court,3,1,1
+6,Belagavi JMFC Court,3,1,1
+7,Bengaluru Rural District & Sessions Court,4,1,1
+8,Bengaluru Rural JMFC Court,4,1,1
+9,Bengaluru Urban District & Sessions Court,5,1,1
+10,Bengaluru Urban JMFC Court,5,1,1
+11,Bidar District & Sessions Court,6,1,1
+12,Bidar JMFC Court,6,1,1
+13,Chamarajanagar District & Sessions Court,7,1,1
+14,Chamarajanagar JMFC Court,7,1,1
+15,Chikkaballapur District & Sessions Court,8,1,1
+16,Chikkaballapur JMFC Court,8,1,1
+17,Chikkamagaluru District & Sessions Court,9,1,1
+18,Chikkamagaluru JMFC Court,9,1,1
+19,Chitradurga District & Sessions Court,10,1,1
+20,Chitradurga JMFC Court,10,1,1
+21,Dakshina Kannada District & Sessions Court,11,1,1
+22,Dakshina Kannada JMFC Court,11,1,1
+23,Davanagere District & Sessions Court,12,1,1
+24,Davanagere JMFC Court,12,1,1
+25,Dharwad District & Sessions Court,13,1,1
+26,Dharwad JMFC Court,13,1,1
+27,Gadag District & Sessions Court,14,1,1
+28,Gadag JMFC Court,14,1,1
+29,Hassan District & Sessions Court,15,1,1
+30,Hassan JMFC Court,15,1,1
+31,Haveri District & Sessions Court,16,1,1
+32,Haveri JMFC Court,16,1,1
+33,Kalaburagi District & Sessions Court,17,1,1
+34,Kalaburagi JMFC Court,17,1,1
+35,Kodagu District & Sessions Court,18,1,1
+36,Kodagu JMFC Court,18,1,1
+37,Kolar District & Sessions Court,19,1,1
+38,Kolar JMFC Court,19,1,1
+39,Koppal District & Sessions Court,20,1,1
+40,Koppal JMFC Court,20,1,1
+41,Mandya District & Sessions Court,21,1,1
+42,Mandya JMFC Court,21,1,1
+43,Mysuru District & Sessions Court,22,1,1
+44,Mysuru JMFC Court,22,1,1
+45,Raichur District & Sessions Court,23,1,1
+46,Raichur JMFC Court,23,1,1
+47,Ramanagara District & Sessions Court,24,1,1
+48,Ramanagara JMFC Court,24,1,1
+49,Shivamogga District & Sessions Court,25,1,1
+50,Shivamogga JMFC Court,25,1,1
+51,Tumakuru District & Sessions Court,26,1,1
+52,Tumakuru JMFC Court,26,1,1
+53,Udupi District & Sessions Court,27,1,1
+54,Udupi JMFC Court,27,1,1
+55,Uttara Kannada District & Sessions Court,28,1,1
+56,Uttara Kannada JMFC Court,28,1,1
+57,Vijayapura District & Sessions Court,29,1,1
+58,Vijayapura JMFC Court,29,1,1
+59,Yadgir District & Sessions Court,30,1,1
+60,Yadgir JMFC Court,30,1,1
+61,Vijayanagara District & Sessions Court,31,1,1
+62,Vijayanagara JMFC Court,31,1,1

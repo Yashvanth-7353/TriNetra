@@ -1,1 +1,12 @@
-OccupationName
+OccupationID,OccupationName
+1,Farmer
+2,Daily Wage Laborer
+3,Government Employee
+4,Private Employee
+5,Student
+6,Unemployed
+7,Business/Self-employed
+8,Homemaker
+9,Driver
+10,Domestic Worker
+11,Retired
