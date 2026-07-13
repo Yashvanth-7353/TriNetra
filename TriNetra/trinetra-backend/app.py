@@ -1,20 +1,21 @@
 import os
-import uvicorn
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Import our engines
-from engines.router import IntentRouter
-from engines.database import HybridDataEngine
+from dotenv import load_dotenv
+load_dotenv()
 
-app = FastAPI(title="TriNetra Core API")
+from engines.router import IntentRouter
+from engines.nl2sql import NL2SQLEngine
+
+app = FastAPI(title="TriNetra Analytical Engine Node")
 router_engine = IntentRouter()
-db_engine = HybridDataEngine()
+nl2sql_engine = NL2SQLEngine()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -22,53 +23,51 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     query: str
-    session_token: str = "local_dev_session"
+    session_token: str = "dev_session"
 
 @app.post("/api/chat")
 async def handle_chat(request: ChatRequest):
-    if not request.query:
-        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query validation error: Payload text missing.")
 
-    # 1. Classify the Intent
-    classification = router_engine.classify_intent(request.query)
+    # 1. Route Intent
+    intent_profile = router_engine.classify_intent(request.query)
     
-    answer_text = ""
-    citations = []
-    
-    # 2. Execute Logic Based on Intent
-    if classification["engine"] == "factual_rag":
-        # Extract a simple keyword to search (In a real RAG, the LLM does this)
-        # For now, we'll just search for the word "burglary" or default to "theft"
-        search_term = "burglary" if "burglary" in request.query.lower() else "unknown"
+    # 2. Compute Target Responses via NL2SQL for Analytics/Lookups
+    if intent_profile["engine"] in ["factual_rag", "predictive_analytics"]:
+        generated_sql = nl2sql_engine.generate_sql(request.query)
+        execution_result = nl2sql_engine.validate_and_execute(generated_sql)
         
-        # Pull from our Data Engine
-        records = db_engine.search_factual_records(search_term)
-        
-        if records:
-            answer_text = f"I found {len(records)} relevant records regarding your query. Here is a summary of the latest incident: {records[0]['BriefFacts']}"
-            citations = [f"{rec['CrimeNo']} ({rec['District']})" for rec in records]
+        if "error" in execution_result:
+            answer = f"I encountered an analytical constraint processing that request: {execution_result['error']}"
+            rows_impacted = 0
         else:
-            answer_text = "I searched the database but could not find any records matching those parameters."
-            
-    else:
-        # Fallback for the other intents we haven't built data functions for yet
-        answer_text = f"Simulated response for a {classification['engine']} query."
+            rows_impacted = len(execution_result["rows"])
+            answer = f"Query executed successfully. Extracted {rows_impacted} matching record fields matching your criteria."
+            if rows_impacted > 0:
+                answer += f" Sample context: {str(execution_result['rows'][0])}"
 
-    # 3. Construct Final Payload
-    response_payload = {
+        return {
+            "status": "success",
+            "intent_detected": intent_profile["engine"],
+            "answer": answer,
+            "citations": [res.get("crimeno", res.get("CrimeNo", "System Index")) for res in execution_result.get("rows", []) if isinstance(res, dict)],
+            "reasoning_trace": {
+                "execution_steps": [
+                    {"step": 1, "action": "Intent Categorization", "detail": intent_profile["reasoning"]},
+                    {"step": 2, "action": "SQL Structural Compile", "detail": generated_sql},
+                    {"step": 3, "action": "Security Whitelist Audit", "detail": f"Evaluated safely. Returned row constraints match: count={rows_impacted}"}
+                ]
+            }
+        }
+
+    # Fallback placeholder route profile path
+    return {
         "status": "success",
-        "intent_detected": classification["engine"],
+        "intent_detected": intent_profile["engine"],
+        "answer": f"Routed successfully to target engine subsystem context profile: {intent_profile['engine']}",
+        "citations": [],
         "reasoning_trace": {
-            "execution_steps": [
-                {"step": 1, "action": "Intent Classification", "detail": classification["reasoning"]},
-                {"step": 2, "action": "Database Execution", "detail": f"Queried CaseMaster for keyword '{request.query}'"}
-            ]
-        },
-        "answer": answer_text,
-        "citations": citations
+            "execution_steps": [{"step": 1, "action": "Intent Isolation", "detail": intent_profile["reasoning"]}]
+        }
     }
-    
-    return response_payload
-
-if __name__ == "__main__":
-    uvicorn.run("app:app", host="127.0.0.1", port=9000, reload=True)

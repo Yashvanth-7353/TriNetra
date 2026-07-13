@@ -3,3 +3,6 @@ uvicorn
 zcatalyst-sdk
 httpx
 pydantic
+psycopg2-binary
+google-generativeai
+groq
