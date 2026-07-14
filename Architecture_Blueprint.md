@@ -9,36 +9,50 @@
 **TriNetra** utilizes a decoupled **Micro-kernel / Orchestration Router Model** deployed completely within the **Zoho Catalyst** infrastructure boundary. The system reads from a replica of the core 26-table Karnataka Police FIR schema, enriches it with 9 additive analytics tables, and provides a multi-engine processing architecture. This approach separates transactional retrieval, vector-based semantic search, relationship tracing, and machine learning pipelines to maintain sub-second latency across analytical workloads.
 
 ```mermaid
+## 1. High-Level System Architecture
+
+**TriNetra** utilizes a decoupled **Orchestration Router Model** deployed across a React frontend and a FastAPI backend. The system connects to a **Neon Serverless PostgreSQL** database, leveraging both standard relational queries and native `pgvector` indexing. This approach separates transactional retrieval, vector-based semantic search, and relationship tracing to maintain sub-second latency across analytical workloads.
+
+```mermaid
 graph TD
-    User([Police Personnel / Investigator]) -->|HTTPS / WSS| AGW[Catalyst API Gateway]
-    AGW -->|Protected Route| AppSail[Catalyst AppSail: FastAPI Engine]
+    User([Police Personnel / Investigator]) -->|HTTP / JSON| API[FastAPI Orchestrator]
     
-    subgraph Core Orchestration [Catalyst AppSail Runtime]
-        Router[Central Intent Router]
+    subgraph Core Orchestration [FastAPI Backend]
+        Router[Central Intent Router & Query Rewriter]
         Ctx[Context & Session Manager]
-        AuthZ[RBAC Context Validator]
-        GraphEng[In-Memory Relational Graph Engine]
-        SHAPEng[Custom SHAP Explanation Module]
+        AuthZ[RBAC & Security Engine]
         
         Router --> Ctx
         Router --> AuthZ
+    end
+    
+    subgraph Intelligence Engines
+        NL2SQL[NL2SQL Engine]
+        RAG[RAG Semantic Engine]
+        GraphEng[NetworkX Graph Engine]
+        
+        Router --> NL2SQL
+        Router --> RAG
         Router --> GraphEng
-        Router --> SHAPEng
     end
     
-    subgraph Intelligence Tier [Managed Serverless Ecosystem]
-        QML[Catalyst QuickML: RAG & LLM Engine]
-        ZiaAuto[Catalyst Zia AutoML: Tabular ML Engine]
-        ZiaSVC[Catalyst Zia Services: Voice & Translation]
-        SmartB[Catalyst SmartBrowz: Headless PDF Engine]
-    end
-    
-    subgraph Storage Tier [Relational & Vector Fabrics]
-        DataStore[(Catalyst Data Store: 35 Relational Tables)]
+    subgraph External AI Services
+        Groq[Groq API: Llama-3.3-70b-versatile]
+        GenAI[Google GenAI: gemini-embedding-001]
     end
 
-    AppSail -->|Orchestration Calls| Intelligence Tier
-    AppSail -->|ZCQL Queries| Storage Tier
+    subgraph Storage Tier [Neon Serverless Postgres]
+        Relational[(Relational FIR Schema)]
+        Vector[(pgvector Embeddings)]
+        Audit[(QueryAuditLog)]
+    end
+
+    NL2SQL -->|Read-Only SQL| Relational
+    RAG -->|Cosine Distance| Vector
+    GraphEng -->|2-Hop Traversal| Relational
+    AuthZ -->|Insert Event| Audit
+    
+    Intelligence Engines --> External AI Services
 
 ```
 
