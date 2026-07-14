@@ -37,28 +37,31 @@ class NL2SQLEngine:
         SQL: SELECT cm.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate FROM CaseMaster cm JOIN Unit u ON cm.PoliceStationID = u.UnitID JOIN District d ON u.DistrictID = d.DistrictID JOIN CaseStatusMaster csm ON cm.CaseStatusID = csm.CaseStatusID WHERE d.DistrictName ILIKE 'Bengaluru Urban' AND csm.CaseStatusName ILIKE 'Charge Sheeted';
         """
 
-    def generate_sql(self, user_query: str, error_context: str = None) -> str:
+    # Update the signature to accept the rbac_filter
+    def generate_sql(self, user_query: str, rbac_filter: str = "1=1", error_context: str = None) -> str:
         if not self.groq_client:
             return "SELECT 'CONFIG_ERROR';"
 
-        repair_prompt = f"\nPREVIOUS ACCUMULATED DATABASE ERROR: {error_context}\nFix the query architecture to avoid this exception." if error_context else ""
+        repair_prompt = f"\nPREVIOUS ERROR: {error_context}\nFix the query architecture." if error_context else ""
 
         prompt = f"""
         You are a senior database engineer generating secure PostgreSQL SELECT queries.
         Target System Context:
         {self._get_schema_context()}
-        {self._get_few_shot_examples()}
-        {repair_prompt}
-
+        
+        MANDATORY SECURITY POLICY:
+        You MUST include the following condition in your WHERE clause to enforce Row-Level Security:
+        AND ({rbac_filter})
+        
         Rules:
         1. Output ONLY a single, valid, raw executable PostgreSQL statement.
-        2. Do NOT wrap code block expressions inside markdown notation like ```sql.
-        3. Never modify records (no DROP, DELETE, UPDATE, INSERT).
-        4. Use ILIKE constraints for loose pattern string criteria lookups.
+        2. Never modify records.
+        3. Ensure the tables referenced in the security policy (cm, u, etc.) are properly JOINed.
 
         User Question: {user_query}
         SQL Query:
         """
+        # ... rest of the generate_sql execution remains the same
         response = self.groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",

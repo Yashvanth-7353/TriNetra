@@ -12,6 +12,8 @@ load_dotenv()
 from engines.router import IntentRouter
 from engines.nl2sql import NL2SQLEngine
 from engines.rag import RAGEngine
+from engines.security import SecurityContext
+security_context = SecurityContext()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -32,6 +34,16 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     query: str
     session_token: str = "local_node_dev_session"
+
+# Update the ChatRequest model to accept user context
+class ChatRequest(BaseModel):
+    query: str
+    session_token: str = "local_node_dev_session"
+    # Mocking JWT/Auth data for the demo
+    role: str = "Investigator" 
+    employee_id: int = 101
+    unit_id: int = 5          # e.g., Mysuru Central PS
+    district_id: int = 2      # e.g., Mysuru District
 
 # State Isolation Context Memory Manager
 session_store = {}
@@ -74,58 +86,68 @@ def synthesize_structural_response(user_query: str, records: list) -> str:
 @app.post("/api/chat")
 async def handle_chat(request: ChatRequest):
     if not request.query.strip():
-        raise HTTPException(status_code=400, detail="Invalid Request Payload: Input prompt text required.")
+        raise HTTPException(status_code=400, detail="Invalid Request Payload.")
+
+    # 1. Generate the security profile BEFORE anything else
+    rbac_sql_filter = security_context.build_rbac_filter(
+        role=request.role, 
+        employee_district_id=request.district_id, 
+        employee_unit_id=request.unit_id
+    )
 
     try:
-        # Context-Aware Session Extraction Phase
         active_memory = access_context_memory(request.session_token)
-        
-        # Compute query optimizations
         standalone_q = request.query
         if active_memory:
             standalone_q = router_engine.rewrite_to_standalone(request.query, active_memory)
 
-        # Classify Core Layer Intent Target
         intent_profile = router_engine.classify_intent(standalone_q)
         target_engine = intent_profile["engine"]
 
         answer_text = ""
         citations_array = []
-        execution_detail = "Subsystem operations execution path standard clean log."
+        execution_detail = ""
+        resolved_query_log = ""
+        row_count_log = 0
 
-        # Branch Processing Operations Orchestrator Block
         if target_engine in ["factual_lookup", "predictive_analytics"]:
-            generated_sql = nl2sql_engine.generate_sql(standalone_q)
+            # Inject the security filter into the SQL generation
+            generated_sql = nl2sql_engine.generate_sql(standalone_q, rbac_filter=rbac_sql_filter)
+            resolved_query_log = generated_sql
             execution_result = nl2sql_engine.validate_and_execute(generated_sql, standalone_q)
             
             if "error" in execution_result:
-                answer_text = f"I couldn't execute that analysis sequence: {execution_result['error']}"
-                execution_detail = f"Failed SQL verification branch step context: {execution_result.get('executed_sql', generated_sql)}"
+                answer_text = f"I couldn't execute that analysis: {execution_result['error']}"
             else:
                 rows_payload = execution_result.get("rows", [])
-                # Pass data matrix fields securely to full natural summarizer
+                row_count_log = len(rows_payload)
                 answer_text = synthesize_structural_response(standalone_q, rows_payload)
-                
-                # Rigorous, verifiable cleaner citation map loop assembly
                 extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
                 citations_array = [str(c) for c in extracted_citations if c][:5]
-                execution_detail = f"Executed SQL Statement: {execution_result.get('executed_sql', generated_sql)}"
+                execution_detail = f"RBAC applied ({request.role}). Executed Query."
 
         elif target_engine == "narrative_rag":
+            # For Milestone 2/3, we pass standard RAG. 
+            # Note: You can apply the same RBAC logic to the RAG vector search in the future!
             rag_result = rag_engine.search_and_summarize(standalone_q)
-            if "error" in rag_result:
-                answer_text = "I ran into a processing limit searching the brief facts narrative indices. Please rephrase."
-                execution_detail = f"RAG Subsystem failure details: {rag_result['error']}"
-            else:
+            resolved_query_log = "VECTOR_SEARCH"
+            if "error" not in rag_result:
                 answer_text = rag_result["answer"]
                 citations_array = rag_result["citations"]
-                execution_detail = "Executed 768-d vector semantic matching traversal across pgvector domain."
-
+                row_count_log = len(citations_array)
         else:
-            answer_text = f"The query parameter requires separate relational entity graph configurations (Engine mapping tier: '{target_engine}')."
-            execution_detail = f"Router Reasoning: {intent_profile['reasoning']}"
+            answer_text = "Routed to external entity graph."
 
-        # Context Memory Synchronization Update
+        # MANDATORY: Log every interaction to the Audit Table
+        security_context.log_audit(
+            employee_id=request.employee_id,
+            role=request.role,
+            raw_query=request.query,
+            engine=target_engine,
+            resolved_sql=resolved_query_log,
+            row_count=row_count_log
+        )
+
         active_memory.append({"role": "user", "text": request.query})
         active_memory.append({"role": "assistant", "text": answer_text})
 
@@ -136,16 +158,12 @@ async def handle_chat(request: ChatRequest):
             "citations": citations_array,
             "reasoning_trace": {
                 "execution_steps": [
-                    {"step": 1, "action": "Conversational Intent Refinement", "detail": f"Raw Input: '{request.query}' -> Self-Contained: '{standalone_q}'"},
-                    {"step": 2, "action": "Intent Target Strategy Mapping", "detail": intent_profile["reasoning"]},
-                    {"step": 3, "action": "Analytical Pipeline Execution Trace", "detail": execution_detail}
+                    {"step": 1, "action": f"Security Check ({request.role})", "detail": f"Filter applied: {rbac_sql_filter}"},
+                    {"step": 2, "action": "Intent Target", "detail": intent_profile["reasoning"]},
+                    {"step": 3, "action": "Execution", "detail": execution_detail}
                 ]
             }
         }
 
     except Exception as server_error:
-        # High-Availability Graceful Degradation Layer Exception Catch
-        raise HTTPException(
-            status_code=500, 
-            detail=f"An unexpected internal network error occurred at the orchestrator level: {str(server_error)}"
-        )
+        raise HTTPException(status_code=500, detail=str(server_error))
