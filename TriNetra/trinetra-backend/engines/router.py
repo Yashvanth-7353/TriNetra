@@ -50,10 +50,11 @@ class IntentRouter:
 
         prompt = f"""
         Analyze the incoming standalone investigator query and categorize it into EXACTLY one engine layer:
-        1. 'factual_lookup': Filtering records, counting rows, dates, statuses (e.g., "List cases in Mysuru with status Closed").
-        2. 'criminal_network': Exploring co-accused, syndicates, shared phone numbers, or money trails.
-        3. 'predictive_analytics': Visualizing trends, hotspots, risk factor scores, or forecasting spikes.
-        4. 'narrative_rag': Fuzzy semantic story searches over case summaries (e.g., "cases involving a stolen gold watch or breaking a rear window").
+        1. 'factual_lookup': Filtering records, counting rows, dates, statuses (e.g., "List cases in Mysuru").
+        2. 'criminal_network': Exploring co-accused, syndicates, or money trails.
+        3. 'trend_analysis': Asking for a chart, graph, or timeline of crime rates over time (e.g., "Show me the crime trend", "Spike in thefts this year").
+        4. 'risk_profile': Asking for the danger level, risk score, or profile of a specific criminal (e.g., "What is the risk score for Accused 80?").
+        5. 'narrative_rag': Fuzzy semantic story searches over case summaries.
 
         Query: "{query}"
 
@@ -68,7 +69,7 @@ class IntentRouter:
                 response_format={"type": "json_object"}
             )
             result = json.loads(response.choices[0].message.content)
-            valid_engines = ["factual_lookup", "criminal_network", "predictive_analytics", "narrative_rag"]
+            valid_engines = ["factual_lookup", "criminal_network", "trend_analysis", "risk_profile", "narrative_rag"]
             if result.get("engine") not in valid_engines:
                 result["engine"] = "factual_lookup"
             return result

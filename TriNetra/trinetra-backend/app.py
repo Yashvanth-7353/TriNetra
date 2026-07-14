@@ -16,6 +16,8 @@ from engines.security import SecurityContext
 security_context = SecurityContext()
 from engines.graph import GraphEngine
 graph_engine = GraphEngine()
+from engines.analytics import AnalyticsEngine
+analytics_engine = AnalyticsEngine()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -113,7 +115,7 @@ async def handle_chat(request: ChatRequest):
         row_count_log = 0
         graph_payload = None  # ADD THIS LINE
 
-        if target_engine in ["factual_lookup", "predictive_analytics"]:
+        if target_engine in ["factual_lookup"]:
             # Inject the security filter into the SQL generation
             generated_sql = nl2sql_engine.generate_sql(standalone_q, rbac_filter=rbac_sql_filter)
             resolved_query_log = generated_sql
@@ -138,6 +140,31 @@ async def handle_chat(request: ChatRequest):
                 answer_text = rag_result["answer"]
                 citations_array = rag_result["citations"]
                 row_count_log = len(citations_array)
+
+        elif target_engine == "trend_analysis":
+            trend_result = analytics_engine.get_crime_trend()
+            if "error" in trend_result:
+                answer_text = f"Trend generation failed: {trend_result['error']}"
+            else:
+                data_points = len(trend_result["trend_data"])
+                answer_text = f"I have generated the crime trend visualization spanning {data_points} months."
+                execution_detail = "Executed temporal aggregation query for trend charting."
+                # We will pass this to the frontend next!
+                # You can attach it to a new field like: graph_data = {"type": "trend", "data": trend_result["trend_data"]}
+
+        elif target_engine == "risk_profile":
+            accused_id = router_engine.extract_accused_id(standalone_q)
+            if accused_id == 0:
+                answer_text = "Please specify an Accused ID to retrieve their risk profile."
+                execution_detail = "Failed to extract Accused ID."
+            else:
+                risk_result = analytics_engine.get_risk_profile(accused_id)
+                if "error" in risk_result:
+                    answer_text = f"Risk profiling failed: {risk_result['error']}"
+                else:
+                    score = risk_result["score"]
+                    answer_text = f"Risk Profile for Accused {accused_id}: Score is {score}/100. Repeat Offender: {risk_result['repeat_offender']}."
+                    execution_detail = f"Queried OffenderRiskScore table for ID {accused_id}."
 
 
         # ... (Inside the branching logic) ...
