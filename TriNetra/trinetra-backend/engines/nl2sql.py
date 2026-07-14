@@ -1,87 +1,100 @@
 import os
 import re
+import json
 import psycopg2
 from groq import Groq
 
 class NL2SQLEngine:
     def __init__(self):
+        # Explicit whitelist configuration parameters
         self.allowed_tables = {
             "casemaster", "district", "casestatusmaster", 
             "casecategory", "gravityoffence", "court", "unit"
         }
         self.db_url = os.getenv("NEON_DATABASE_URL")
-        # Initialize Groq Client
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
 
     def _get_schema_context(self) -> str:
         return """
-        SCHEMA:
-        - CaseMaster: CaseMasterID (PK), CrimeNo, PoliceStationID (FK to Unit), CaseStatusID (FK to CaseStatusMaster)
-        - Unit: UnitID (PK), UnitName, DistrictID (FK to District)
-        - District: DistrictID (PK), DistrictName
-        - CaseStatusMaster: CaseStatusID (PK), CaseStatusName
+        SCHEMA MAP:
+        - CaseMaster: CaseMasterID (INT PK), CrimeNo (VARCHAR), PoliceStationID (INT FK to Unit), CaseStatusID (INT FK to CaseStatusMaster), CrimeRegisteredDate (DATE), BriefFacts (TEXT)
+        - Unit: UnitID (INT PK), UnitName (VARCHAR), DistrictID (INT FK to District)
+        - District: DistrictID (INT PK), DistrictName (VARCHAR)
+        - CaseStatusMaster: CaseStatusID (INT PK), CaseStatusName (VARCHAR) -> e.g., 'Under Investigation', 'Charge Sheeted', 'Closed'
         
-        JOIN PATHS:
-        - To filter by District: Join CaseMaster -> Unit -> District
-        - To filter by Status: Join CaseMaster -> CaseStatusMaster
+        JOIN INSTRUCTIONS:
+        - To filter by District name, query path requires: CaseMaster -> Unit -> District
+        - To filter by Case Status value, query path requires: CaseMaster -> CaseStatusMaster
         """
 
-    def generate_sql(self, user_query: str) -> str:
+    def _get_few_shot_examples(self) -> str:
+        return """
+        EXAMPLES:
+        Q: "How many cases are there in Mysuru?"
+        SQL: SELECT COUNT(cm.CaseMasterID) FROM CaseMaster cm JOIN Unit u ON cm.PoliceStationID = u.UnitID JOIN District d ON u.DistrictID = d.DistrictID WHERE d.DistrictName ILIKE 'Mysuru';
+
+        Q: "List cases in Bengaluru Urban with status Charge Sheeted"
+        SQL: SELECT cm.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate FROM CaseMaster cm JOIN Unit u ON cm.PoliceStationID = u.UnitID JOIN District d ON u.DistrictID = d.DistrictID JOIN CaseStatusMaster csm ON cm.CaseStatusID = csm.CaseStatusID WHERE d.DistrictName ILIKE 'Bengaluru Urban' AND csm.CaseStatusName ILIKE 'Charge Sheeted';
+        """
+
+    def generate_sql(self, user_query: str, error_context: str = None) -> str:
         if not self.groq_client:
-            return "SELECT 'API_KEY_MISSING' AS error;"
+            return "SELECT 'CONFIG_ERROR';"
+
+        repair_prompt = f"\nPREVIOUS ACCUMULATED DATABASE ERROR: {error_context}\nFix the query architecture to avoid this exception." if error_context else ""
 
         prompt = f"""
-        You are a highly secure database analyst for the Karnataka Police FIR system.
-        Convert the user's question into a standard PostgreSQL query based ONLY on this schema:
-
+        You are a senior database engineer generating secure PostgreSQL SELECT queries.
+        Target System Context:
         {self._get_schema_context()}
+        {self._get_few_shot_examples()}
+        {repair_prompt}
 
         Rules:
-        1. Respond ONLY with raw executable PostgreSQL code.
-        2. Do NOT wrap code in markdown code blocks like ```sql.
-        3. Only generate SELECT statements.
-        4. Use ILIKE for text matching.
+        1. Output ONLY a single, valid, raw executable PostgreSQL statement.
+        2. Do NOT wrap code block expressions inside markdown notation like ```sql.
+        3. Never modify records (no DROP, DELETE, UPDATE, INSERT).
+        4. Use ILIKE constraints for loose pattern string criteria lookups.
 
         User Question: {user_query}
+        SQL Query:
         """
+        response = self.groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0
+        )
+        sql = response.choices[0].message.content.strip()
+        return sql.replace("```sql", "").replace("```", "").strip()
+
+    def validate_and_execute(self, sql_query: str, user_query: str, retry_count: int = 0) -> dict:
+        clean_query = sql_query.strip().lower()
         
-        try:
-            # Updated to the current, active Llama 3.3 model
-            chat_completion = self.groq_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You output only raw SQL code."},
-                    {"role": "user", "content": prompt}
-                ],
-                model="llama-3.3-70b-versatile", 
-                temperature=0, 
-            )
-            
-            sql = chat_completion.choices[0].message.content.strip()
-            sql = sql.replace("```sql", "").replace("```", "").strip()
-            return sql
-            
-        except Exception as e:
-            # Safely escape single quotes in the error message so it doesn't break SQL syntax
-            safe_error = str(e).replace("'", "''")
-            return f"SELECT 'LLM_ERROR' AS error_code, '{safe_error}' AS message;"
+        # Guardrail Tier 1: Multi-Statement Detection Block
+        stripped_end = sql_query.strip().rstrip(';')
+        if ';' in stripped_end or clean_query.count("select") > 1:
+            return {"error": "Security Constraint Violation: Multi-statement execution sequences are rejected."}
 
-    def validate_and_execute(self, sql_query: str) -> dict:
-        # 1. Enforcement Guardrails
-        clean_query = sql_query.lower()
-        if not clean_query.strip().startswith("select"):
-            return {"error": "Security Blocked: Only SELECT queries are permitted."}
+        # Guardrail Tier 2: Read Operations Enforcement Check
+        if not clean_query.startswith("select"):
+            return {"error": "Security Constraint Violation: Only data read (SELECT) sequences are permitted."}
 
+        # Guardrail Tier 3: Whitelist Boundary Matching Validation
         table_tokens = re.findall(r'from\s+([a-zA-Z_0-9]+)|join\s+([a-zA-Z_0-9]+)', clean_query)
         extracted_tables = {t for tup in table_tokens for t in tup if t}
 
         for table in extracted_tables:
             if table not in self.allowed_tables:
-                return {"error": f"Security Blocked: Execution unauthorized on target table '{table}'."}
+                return {"error": f"Security Constraint Violation: Target table domain target '{table}' outside access control boundaries."}
 
-        # 2. Execution Tier
+        # Guardrail Tier 4: Enforce Cap Limits Safeguard
+        if "limit" not in clean_query:
+            sql_query = sql_query.rstrip(';') + " LIMIT 200;"
+
         if not self.db_url:
-            return {"error": "Database configuration error: NEON_DATABASE_URL missing."}
+            return {"error": "Database Configuration Failure: Access token mismatch parameters."}
 
+        # Execution Engine with Automatic Self-Repair Loop Loop Trace
         try:
             conn = psycopg2.connect(self.db_url)
             cursor = conn.cursor()
@@ -95,7 +108,13 @@ class NL2SQLEngine:
             
             return {
                 "columns": columns,
-                "rows": [dict(zip(columns, row)) for row in rows]
+                "rows": [dict(zip(columns, row)) for row in rows],
+                "executed_sql": sql_query
             }
-        except Exception as e:
-            return {"error": f"Database Execution Failure: {str(e)}"}
+        except Exception as db_exception:
+            # Self-Correction Step Trigger Logic Condition Check
+            if retry_count < 1: 
+                recompiled_sql = self.generate_sql(user_query, error_context=str(db_exception))
+                return self.validate_and_execute(recompiled_sql, user_query, retry_count=retry_count+1)
+            
+            return {"error": f"Database Runtime Exception: {str(db_exception)}", "executed_sql": sql_query}
