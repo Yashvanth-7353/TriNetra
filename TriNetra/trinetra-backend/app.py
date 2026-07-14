@@ -14,6 +14,8 @@ from engines.nl2sql import NL2SQLEngine
 from engines.rag import RAGEngine
 from engines.security import SecurityContext
 security_context = SecurityContext()
+from engines.graph import GraphEngine
+graph_engine = GraphEngine()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -109,6 +111,7 @@ async def handle_chat(request: ChatRequest):
         execution_detail = ""
         resolved_query_log = ""
         row_count_log = 0
+        graph_payload = None  # ADD THIS LINE
 
         if target_engine in ["factual_lookup", "predictive_analytics"]:
             # Inject the security filter into the SQL generation
@@ -135,8 +138,41 @@ async def handle_chat(request: ChatRequest):
                 answer_text = rag_result["answer"]
                 citations_array = rag_result["citations"]
                 row_count_log = len(citations_array)
+
+
+        # ... (Inside the branching logic) ...
+        elif target_engine == "criminal_network":
+            # 1. Extract the ID from the query
+            accused_id = router_engine.extract_accused_id(standalone_q)
+
+            if accused_id == 0:
+                answer_text = "I need a specific Accused ID to map a network. For example: 'Show me the network for Accused 104'."
+                execution_detail = "Failed to extract integer Accused ID from prompt."
+            else:
+                # 2. Run the NetworkX Traversal
+                graph_result = graph_engine.network_for_accused(accused_id)
+                resolved_query_log = f"GRAPH_TRAVERSAL: AccusedID {accused_id}"
+
+                if "error" in graph_result:
+                    answer_text = f"Graph engine response: {graph_result['error']}"
+                    execution_detail = "Target node not found in precomputed graph bounds."
+                else:
+                    node_count = len(graph_result["nodes"])
+                    edge_count = len(graph_result["edges"])
+                    row_count_log = node_count
+
+                    answer_text = f"Successfully mapped the criminal syndicate. Found {node_count} linked entities and {edge_count} direct connections (co-accused and financial)."
+
+                    # Extract the case numbers from the edges to use as citations
+                    extracted_citations = [str(e["case"]) for e in graph_result["edges"] if str(e["case"]) != "None"]
+                    citations_array = list(set(extracted_citations))[:5] # Deduplicate and cap at 5
+                    execution_detail = f"Executed 2-hop Louvain network map. Displaying {node_count} nodes."
+
+                    graph_payload = graph_result  # ADD THIS LINE
+
         else:
-            answer_text = "Routed to external entity graph."
+            answer_text = "Routed to Analytics endpoint (Milestone 4)."
+            execution_detail = "Routing placeholder."
 
         # MANDATORY: Log every interaction to the Audit Table
         security_context.log_audit(
@@ -156,6 +192,7 @@ async def handle_chat(request: ChatRequest):
             "intent_detected": target_engine,
             "answer": answer_text,
             "citations": citations_array,
+            "graph_data": graph_payload, # ADD THIS LINE
             "reasoning_trace": {
                 "execution_steps": [
                     {"step": 1, "action": f"Security Check ({request.role})", "detail": f"Filter applied: {rbac_sql_filter}"},

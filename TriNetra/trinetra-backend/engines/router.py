@@ -1,6 +1,7 @@
 import os
 import json
 from groq import Groq
+import re # Make sure 're' is imported at the top of router.py
 
 class IntentRouter:
     def __init__(self):
@@ -73,3 +74,26 @@ class IntentRouter:
             return result
         except Exception as e:
             return {"engine": "factual_lookup", "reasoning": f"Default fallback. Error: {str(e)}"}
+        
+    def extract_accused_id(self, query: str) -> int:
+        """Extracts the Accused ID from a query to use as a graph traversal starting point."""
+        if not self.groq_client:
+            return 0
+            
+        prompt = f"""
+        Extract the Accused ID (an integer) from the following investigator query.
+        If no explicit ID is found, return 0.
+        Output ONLY the raw integer. Do not output anything else.
+        Query: "{query}"
+        """
+        try:
+            response = self.groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+                temperature=0
+            )
+            # Safely parse the first number found in the response
+            match = re.search(r'\d+', response.choices[0].message.content)
+            return int(match.group()) if match else 0
+        except Exception:
+            return 0
