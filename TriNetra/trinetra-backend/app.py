@@ -114,6 +114,7 @@ async def handle_chat(request: ChatRequest):
         resolved_query_log = ""
         row_count_log = 0
         graph_payload = None  # ADD THIS LINE
+        analytics_payload = None
 
         if target_engine in ["factual_lookup"]:
             # Inject the security filter into the SQL generation
@@ -149,9 +150,10 @@ async def handle_chat(request: ChatRequest):
                 data_points = len(trend_result["trend_data"])
                 answer_text = f"I have generated the crime trend visualization spanning {data_points} months."
                 execution_detail = "Executed temporal aggregation query for trend charting."
-                # We will pass this to the frontend next!
-                # You can attach it to a new field like: graph_data = {"type": "trend", "data": trend_result["trend_data"]}
-
+                
+                # ADD THIS LINE:
+                analytics_payload = {"type": "trend", "data": trend_result["trend_data"]}
+                
         elif target_engine == "risk_profile":
             accused_id = router_engine.extract_accused_id(standalone_q)
             if accused_id == 0:
@@ -165,6 +167,9 @@ async def handle_chat(request: ChatRequest):
                     score = risk_result["score"]
                     answer_text = f"Risk Profile for Accused {accused_id}: Score is {score}/100. Repeat Offender: {risk_result['repeat_offender']}."
                     execution_detail = f"Queried OffenderRiskScore table for ID {accused_id}."
+                    
+                    # ADD THIS LINE:
+                    analytics_payload = {"type": "risk", "data": risk_result}
 
 
         # ... (Inside the branching logic) ...
@@ -220,6 +225,7 @@ async def handle_chat(request: ChatRequest):
             "answer": answer_text,
             "citations": citations_array,
             "graph_data": graph_payload, # ADD THIS LINE
+            "analytics_data": analytics_payload, # ADD THIS LINE
             "reasoning_trace": {
                 "execution_steps": [
                     {"step": 1, "action": f"Security Check ({request.role})", "detail": f"Filter applied: {rbac_sql_filter}"},
