@@ -12,7 +12,7 @@ interface ExecutionStep {
 interface Message {
   sender: 'user' | 'system';
   text: string;
-  intent?: string;
+  intent_detected?: string;
   trace?: ExecutionStep[];
 }
 
@@ -40,7 +40,7 @@ function App() {
       const systemMsg: Message = {
         sender: 'system',
         text: response.answer,
-        intent: response.intent_detected,
+        intent_detected: response.intent_detected,
         trace: response.reasoning_trace?.execution_steps
       };
       
@@ -75,7 +75,7 @@ function App() {
             <div key={idx} className={`message ${msg.sender}`}>
               <div className="message-bubble">
                 <p>{msg.text}</p>
-                {msg.intent && <span className="intent-tag">Engine: {msg.intent}</span>}
+                {msg.intent_detected && <span className="intent-tag">Engine: {msg.intent_detected}</span>}
               </div>
             </div>
           ))}

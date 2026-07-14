@@ -15,32 +15,15 @@ class NL2SQLEngine:
 
     def _get_schema_context(self) -> str:
         return """
-        Table: CaseMaster
-        - CaseMasterID (INT, Primary Key)
-        - CrimeNo (VARCHAR, Unique FIR Code)
-        - CaseNo (VARCHAR)
-        - CrimeRegisteredDate (DATE)
-        - PoliceStationID (INT, References Unit)
-        - CaseCategoryID (INT, References CaseCategory)
-        - CaseStatusID (INT, References CaseStatusMaster)
-        - BriefFacts (TEXT)
-
-        Table: Unit
-        - UnitID (INT, Primary Key)
-        - UnitName (VARCHAR)
-        - DistrictID (INT, References District)
-
-        Table: District
-        - DistrictID (INT, Primary Key)
-        - DistrictName (VARCHAR)
-
-        Table: CaseStatusMaster
-        - CaseStatusID (INT, Primary Key)
-        - CaseStatusName (VARCHAR) ex: 'Under Investigation', 'Charge Sheeted', 'Closed'
-
-        Table: CaseCategory
-        - CaseCategoryID (INT, Primary Key)
-        - LookupValue (VARCHAR) ex: 'FIR', 'UDR', 'PAR', 'Zero FIR'
+        SCHEMA:
+        - CaseMaster: CaseMasterID (PK), CrimeNo, PoliceStationID (FK to Unit), CaseStatusID (FK to CaseStatusMaster)
+        - Unit: UnitID (PK), UnitName, DistrictID (FK to District)
+        - District: DistrictID (PK), DistrictName
+        - CaseStatusMaster: CaseStatusID (PK), CaseStatusName
+        
+        JOIN PATHS:
+        - To filter by District: Join CaseMaster -> Unit -> District
+        - To filter by Status: Join CaseMaster -> CaseStatusMaster
         """
 
     def generate_sql(self, user_query: str) -> str:
