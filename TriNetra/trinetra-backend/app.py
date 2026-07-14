@@ -9,6 +9,8 @@ load_dotenv()
 from engines.router import IntentRouter
 from engines.nl2sql import NL2SQLEngine
 from engines.rag import RAGEngine
+from engines.graph import GraphEngine
+graph_engine = GraphEngine()
 
 app = FastAPI(title="TriNetra Analytical Engine Node")
 router_engine = IntentRouter()
@@ -98,3 +100,9 @@ async def handle_chat(request: ChatRequest):
             "execution_steps": [{"step": 1, "action": "Intent Isolation", "detail": intent_profile["reasoning"]}]
         }
     }
+
+# Add this endpoint in app.py:
+@app.get("/api/network/{accused_id}")
+async def get_network(accused_id: int):
+    data = graph_engine.get_criminal_network(accused_id)
+    return data
