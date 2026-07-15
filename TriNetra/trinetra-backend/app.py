@@ -1,9 +1,10 @@
 import os
 import time
 import json
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -18,6 +19,7 @@ from engines.graph import GraphEngine
 graph_engine = GraphEngine()
 from engines.analytics import AnalyticsEngine
 analytics_engine = AnalyticsEngine()
+from engines.auth import authenticate_employee, create_jwt_token, verify_jwt_token, get_employee_profile
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -29,25 +31,47 @@ rag_engine = RAGEngine()
 # Hardened Browser CORS Boundary Profile Configurations
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "[http://127.0.0.1:5173](http://127.0.0.1:5173)"], 
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class ChatRequest(BaseModel):
-    query: str
-    session_token: str = "local_node_dev_session"
+class LoginRequest(BaseModel):
+    employee_id: int
+    password: str
 
-# Update the ChatRequest model to accept user context
 class ChatRequest(BaseModel):
     query: str
     session_token: str = "local_node_dev_session"
-    # Mocking JWT/Auth data for the demo
+    # These are fallbacks; JWT token overrides them when present
     role: str = "Investigator" 
     employee_id: int = 101
-    unit_id: int = 5          # e.g., Mysuru Central PS
-    district_id: int = 2      # e.g., Mysuru District
+    unit_id: int = 5
+    district_id: int = 2
+
+
+@app.post("/api/login")
+async def login(request: LoginRequest):
+    """Authenticates employee and returns JWT token + profile."""
+    profile = authenticate_employee(request.employee_id, request.password)
+    token = create_jwt_token(profile)
+    return {
+        "status": "success",
+        "token": token,
+        "profile": profile
+    }
+
+
+@app.get("/api/profile")
+async def get_profile(authorization: Optional[str] = Header(None)):
+    """Returns the full profile of the currently authenticated employee."""
+    payload = verify_jwt_token(authorization)
+    profile = get_employee_profile(payload["employee_id"])
+    if "error" in profile:
+        raise HTTPException(status_code=404, detail=profile["error"])
+    return {"status": "success", "profile": profile}
+
 
 # State Isolation Context Memory Manager
 session_store = {}
