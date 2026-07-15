@@ -1,7 +1,7 @@
 import os
 import time
 import json
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -19,6 +19,10 @@ from engines.graph import GraphEngine
 graph_engine = GraphEngine()
 from engines.analytics import AnalyticsEngine
 analytics_engine = AnalyticsEngine()
+from engines.case_explorer import CaseExplorerEngine
+case_explorer_engine = CaseExplorerEngine()
+from engines.network_engine import NetworkEngine
+network_engine = NetworkEngine()
 from engines.auth import authenticate_employee, create_jwt_token, verify_jwt_token, get_employee_profile
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
@@ -71,6 +75,90 @@ async def get_profile(authorization: Optional[str] = Header(None)):
     if "error" in profile:
         raise HTTPException(status_code=404, detail=profile["error"])
     return {"status": "success", "profile": profile}
+
+
+# ──────────────────────────────────────────────
+#  Case Explorer REST Endpoints
+# ──────────────────────────────────────────────
+
+@app.get("/api/cases/filters")
+async def get_case_filters():
+    """Returns dropdown options for district, status, category, and crime head filters."""
+    result = case_explorer_engine.get_filter_options()
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/cases")
+async def search_cases(
+    district_id: Optional[int] = Query(None),
+    status_id: Optional[int] = Query(None),
+    category_id: Optional[int] = Query(None),
+    crime_head_id: Optional[int] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Paginated, filterable case search."""
+    result = case_explorer_engine.search_cases(
+        district_id=district_id,
+        status_id=status_id,
+        category_id=category_id,
+        crime_head_id=crime_head_id,
+        date_from=date_from,
+        date_to=date_to,
+        search_term=search,
+        page=page,
+        page_size=page_size,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/cases/{case_id}")
+async def get_case_detail(case_id: int):
+    """Returns full case detail including timeline, people, and chargesheet."""
+    result = case_explorer_engine.get_case_detail(case_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return {"status": "success", **result}
+
+
+
+# ──────────────────────────────────────────────
+#  Network Analysis REST Endpoints
+# ──────────────────────────────────────────────
+
+@app.get("/api/network/search")
+async def network_search(q: str = Query(..., min_length=1), limit: int = Query(15, ge=1, le=50)):
+    """Search accused by name or ID for the network search box."""
+    results = network_engine.search_accused(q, limit=limit)
+    return {"status": "success", "results": results}
+
+
+@app.get("/api/network/node/{accused_id}")
+async def get_network_node_detail(accused_id: int, layers: Optional[str] = Query(None)):
+    """Returns detailed info about a specific node for the side panel."""
+    active_layers = layers.split(",") if layers else None
+    result = network_engine.get_node_detail(accused_id, active_layers=active_layers)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/network/{accused_id}")
+async def get_network(accused_id: int, hops: int = Query(2, ge=1, le=3), layers: Optional[str] = Query(None)):
+    """Returns the N-hop criminal network graph with community detection."""
+    active_layers = layers.split(",") if layers else None
+    result = network_engine.get_network(accused_id, max_hops=hops, active_layers=active_layers)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return {"status": "success", **result}
+
 
 
 # State Isolation Context Memory Manager
