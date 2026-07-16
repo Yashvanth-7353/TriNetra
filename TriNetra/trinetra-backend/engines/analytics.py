@@ -53,3 +53,183 @@ class AnalyticsEngine:
             return {"trend_data": data}
         except Exception as e:
             return {"error": str(e)}
+
+    def _build_filters(self, district_id=None, time_window=None, category_id=None):
+        conditions = []
+        params = []
+        if district_id:
+            conditions.append("u.DistrictID = %s")
+            params.append(district_id)
+        if category_id:
+            conditions.append("cm.CaseCategoryID = %s")
+            params.append(category_id)
+        if time_window:
+            if len(time_window) == 7 and "-" in time_window:
+                conditions.append("TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') = %s")
+                params.append(time_window)
+            elif time_window == "3m":
+                conditions.append("cm.CrimeRegisteredDate >= NOW() - INTERVAL '3 months'")
+            elif time_window == "6m":
+                conditions.append("cm.CrimeRegisteredDate >= NOW() - INTERVAL '6 months'")
+            elif time_window == "12m":
+                conditions.append("cm.CrimeRegisteredDate >= NOW() - INTERVAL '12 months'")
+        return conditions, params
+
+    def get_analytics_summary(self, district_id=None, time_window=None, category_id=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            
+            conditions, params = self._build_filters(district_id, time_window, category_id)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            # 1. Total cases
+            cur.execute(f"""
+                SELECT COUNT(*) 
+                FROM CaseMaster cm 
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID 
+                WHERE {where_clause}
+            """, params)
+            total_cases = cur.fetchone()[0]
+            
+            # 2. Solved cases (status IN (3,4,5,6,7,8))
+            solved_conditions = list(conditions) + ["cm.CaseStatusID IN (3,4,5,6,7,8)"]
+            solved_where = " AND ".join(solved_conditions)
+            cur.execute(f"""
+                SELECT COUNT(*) 
+                FROM CaseMaster cm 
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID 
+                WHERE {solved_where}
+            """, params)
+            solved_cases = cur.fetchone()[0]
+            solved_pct = round((solved_cases / total_cases * 100), 1) if total_cases > 0 else 0.0
+            
+            # 3. Highest Activity District
+            cur.execute(f"""
+                SELECT d.DistrictName, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN District d ON u.DistrictID = d.DistrictID
+                WHERE {where_clause}
+                GROUP BY d.DistrictName
+                ORDER BY c DESC
+                LIMIT 1
+            """, params)
+            act_row = cur.fetchone()
+            highest_district = f"{act_row[0]} ({act_row[1]})" if act_row else "N/A"
+            
+            # 4. Biggest MoM Change (or latest MoM change)
+            cur.execute(f"""
+                SELECT TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') as month, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE {where_clause} AND cm.CrimeRegisteredDate IS NOT NULL
+                GROUP BY month
+                ORDER BY month DESC
+                LIMIT 2
+            """, params)
+            mom_rows = cur.fetchall()
+            mom_change = "0.0%"
+            if len(mom_rows) == 2:
+                latest_count = mom_rows[0][1]
+                prev_count = mom_rows[1][1]
+                if prev_count > 0:
+                    change = ((latest_count - prev_count) / prev_count) * 100
+                    prefix = "+" if change >= 0 else ""
+                    mom_change = f"{prefix}{round(change, 1)}%"
+            
+            cur.close()
+            conn.close()
+            
+            return {
+                "total_cases": total_cases,
+                "solved_percentage": solved_pct,
+                "highest_activity_district": highest_district,
+                "biggest_mom_change": mom_change
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_hotspots(self, district_id=None, time_window=None, category_id=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            
+            conditions, params = self._build_filters(district_id, time_window, category_id)
+            conditions.append("cm.latitude IS NOT NULL AND cm.longitude IS NOT NULL")
+            where_clause = " AND ".join(conditions)
+            
+            cur.execute(f"""
+                SELECT cm.latitude, cm.longitude, ch.CrimeGroupName as category, cm.CrimeNo, cm.BriefFacts
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                LEFT JOIN CrimeHead ch ON cm.CrimeMajorHeadID = ch.CrimeHeadID
+                WHERE {where_clause}
+                LIMIT 500
+            """, params)
+            rows = cur.fetchall()
+            
+            hotspots = []
+            for r in rows:
+                hotspots.append({
+                    "lat": float(r[0]),
+                    "lng": float(r[1]),
+                    "category": r[2] or "Unknown",
+                    "crime_no": r[3],
+                    "brief_facts": r[4][:120] + "..." if r[4] else ""
+                })
+                
+            cur.close()
+            conn.close()
+            return {"hotspots": hotspots}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_trends(self, district_id=None, time_window=None, category_id=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            
+            conditions, params = self._build_filters(district_id, time_window, category_id)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            cur.execute(f"""
+                SELECT TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') as month, COUNT(*) as case_count
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE {where_clause} AND cm.CrimeRegisteredDate IS NOT NULL
+                GROUP BY month
+                ORDER BY month ASC
+                LIMIT 18
+            """, params)
+            rows = cur.fetchall()
+            
+            cur.execute(f"""
+                SELECT TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') as month, cc.LookupValue as category, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN CaseCategory cc ON cm.CaseCategoryID = cc.CaseCategoryID
+                WHERE {where_clause} AND cm.CrimeRegisteredDate IS NOT NULL
+                GROUP BY month, category
+                ORDER BY month ASC
+            """, params)
+            cat_rows = cur.fetchall()
+            
+            cur.close()
+            conn.close()
+            
+            trend_data = [{"month": r[0], "count": r[1]} for r in rows]
+            
+            category_breakdown = {}
+            for r in cat_rows:
+                m, cat, cnt = r[0], r[1], r[2]
+                if m not in category_breakdown:
+                    category_breakdown[m] = {}
+                category_breakdown[m][cat] = cnt
+                
+            return {
+                "trend_data": trend_data,
+                "category_breakdown": category_breakdown
+            }
+        except Exception as e:
+            return {"error": str(e)}

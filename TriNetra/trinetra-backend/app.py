@@ -127,6 +127,60 @@ async def get_case_detail(case_id: int):
         raise HTTPException(status_code=404, detail=result["error"])
     return {"status": "success", **result}
 
+# ──────────────────────────────────────────────
+#  Crime Analytics REST Endpoints
+# ──────────────────────────────────────────────
+
+@app.get("/api/analytics/summary")
+async def get_analytics_summary(
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None),
+    category_id: Optional[int] = Query(None)
+):
+    """Returns analytics dashboard KPI summary stats."""
+    result = analytics_engine.get_analytics_summary(
+        district_id=district_id,
+        time_window=time_window,
+        category_id=category_id
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/analytics/hotspots")
+async def get_analytics_hotspots(
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None),
+    category_id: Optional[int] = Query(None)
+):
+    """Returns coordinate list for Leaflet map hotspot visualization."""
+    result = analytics_engine.get_analytics_hotspots(
+        district_id=district_id,
+        time_window=time_window,
+        category_id=category_id
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/analytics/trends")
+async def get_analytics_trends(
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None),
+    category_id: Optional[int] = Query(None)
+):
+    """Returns historical crime count trend and category breakdowns."""
+    result = analytics_engine.get_analytics_trends(
+        district_id=district_id,
+        time_window=time_window,
+        category_id=category_id
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
 
 
 # ──────────────────────────────────────────────

@@ -506,3 +506,87 @@ export async function fetchNodeDetail(accusedId: number, layers?: string[]): Pro
   }
   return response.json();
 }
+
+export interface AnalyticsSearchParams {
+  district_id?: number;
+  time_window?: string;
+  category_id?: number;
+}
+
+export interface AnalyticsSummaryResponse {
+  status: string;
+  total_cases: number;
+  solved_percentage: number;
+  highest_activity_district: string;
+  biggest_mom_change: string;
+}
+
+export interface HotspotPoint {
+  lat: number;
+  lng: number;
+  category: string;
+  crime_no: string;
+  brief_facts: string;
+}
+
+export interface AnalyticsHotspotsResponse {
+  status: string;
+  hotspots: HotspotPoint[];
+}
+
+export interface AnalyticsTrendsResponse {
+  status: string;
+  trend_data: TrendDataPoint[];
+  category_breakdown: Record<string, Record<string, number>>;
+}
+
+export async function fetchAnalyticsSummary(params: AnalyticsSearchParams): Promise<AnalyticsSummaryResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(`${API_BASE}/api/analytics/summary${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to load summary' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchAnalyticsHotspots(params: AnalyticsSearchParams): Promise<AnalyticsHotspotsResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(`${API_BASE}/api/analytics/hotspots${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to load hotspots' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchAnalyticsTrends(params: AnalyticsSearchParams): Promise<AnalyticsTrendsResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(`${API_BASE}/api/analytics/trends${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to load trends' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
