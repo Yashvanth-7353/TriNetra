@@ -196,6 +196,29 @@ async def get_analytics_offenders(
     return {"status": "success", **result}
 
 
+@app.get("/api/analytics/alerts")
+async def get_analytics_alerts(
+    district_id: Optional[int] = Query(None),
+    authorization: Optional[str] = Header(None)
+):
+    """Returns prevention alerts computed for the logged in employee jurisdiction only."""
+    if authorization:
+        try:
+            payload = verify_jwt_token(authorization)
+            if "district_id" in payload:
+                district_id = payload["district_id"]
+        except Exception:
+            pass
+            
+    if not district_id:
+        district_id = 2
+        
+    result = analytics_engine.get_prevention_alerts(district_id=district_id)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
 
 # ──────────────────────────────────────────────
 #  Network Analysis REST Endpoints

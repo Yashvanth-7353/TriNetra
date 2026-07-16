@@ -629,3 +629,29 @@ export async function fetchOffendersList(search?: string, page: number = 1, page
   }
   return response.json();
 }
+
+export interface PreventionAlert {
+  id: number;
+  district: string;
+  category: string;
+  reason: string;
+  severity: 'high' | 'medium';
+  data: { v: number }[];
+}
+
+export interface PreventionAlertsResponse {
+  status: string;
+  alerts: PreventionAlert[];
+}
+
+export async function fetchPreventionAlerts(districtId?: number): Promise<PreventionAlertsResponse> {
+  const qs = districtId ? `?district_id=${districtId}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/alerts${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to load prevention alerts' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
