@@ -1,5 +1,5 @@
 import React from 'react';
-import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, Link } from 'react-router-dom';
 import {
   LayoutDashboard,
   MessageSquareText,
@@ -8,7 +8,6 @@ import {
   BarChart3,
   UserX,
   BellRing,
-  Settings as SettingsIcon,
   User,
   LogOut,
   Shield
@@ -117,10 +116,10 @@ export default function AppShell() {
               </span>
             )}
 
-            <button className="text-slate-500 hover:text-primary-900 transition-colors relative">
+            <Link to="/alerts" className="text-slate-500 hover:text-primary-900 transition-colors relative">
               <BellRing className="w-5 h-5" />
               <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>
-            </button>
+            </Link>
 
             <NavLink to="/profile" className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-full bg-primary-900 flex items-center justify-center text-sm font-bold text-accent-500">
