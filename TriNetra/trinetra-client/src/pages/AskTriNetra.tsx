@@ -14,7 +14,8 @@ export interface Message {
   reasoning_trace?: any;
   graph_data?: { 
     nodes: any[]; 
-    edges: any[] 
+    edges: any[];
+    root_node?: string;
   } | null;
   analytics_data?: {
     type: 'trend' | 'risk';
@@ -183,7 +184,14 @@ export default function AskTriNetra() {
                 {/* Graph visualization from backend graph_data */}
                 {msg.graph_data && msg.graph_data.nodes && msg.graph_data.nodes.length > 0 && (
                   <div className="mt-4 border border-slate-200 rounded-xl overflow-hidden h-[400px] bg-slate-50">
-                    <NetworkGraph data={msg.graph_data} />
+                    <NetworkGraph
+                      nodes={msg.graph_data.nodes}
+                      edges={msg.graph_data.edges}
+                      rootNode={msg.graph_data.root_node || ''}
+                      showCommunities={false}
+                      selectedNodeId={null}
+                      onNodeClick={() => {}}
+                    />
                   </div>
                 )}
 

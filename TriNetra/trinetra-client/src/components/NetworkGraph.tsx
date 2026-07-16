@@ -56,17 +56,50 @@ export default function NetworkGraph({
 }: GraphProps) {
   // ── Force-directed layout calculation ──
   const layoutNodes = useMemo(() => {
-    if (graphNodes.length === 0) return [];
+    if (graphNodes.length === 0) return {};
 
     // Use a seeded force-directed algorithm simulation
     const positions: Record<string, { x: number; y: number }> = {};
     const centerX = 400;
     const centerY = 300;
 
+    // Build adjacency list for BFS distance calculations
+    const adj: Record<string, string[]> = {};
+    graphEdges.forEach((e) => {
+      if (!adj[e.from]) adj[e.from] = [];
+      if (!adj[e.to]) adj[e.to] = [];
+      adj[e.from].push(e.to);
+      adj[e.to].push(e.from);
+    });
+
+    // BFS to find distance from rootNode
+    const bfsDistances: Record<string, number> = {};
+    if (rootNode) {
+      const queue: [string, number][] = [[rootNode, 0]];
+      bfsDistances[rootNode] = 0;
+      while (queue.length > 0) {
+        const [curr, dist] = queue.shift()!;
+        const neighbors = adj[curr] || [];
+        for (const neighbor of neighbors) {
+          if (bfsDistances[neighbor] === undefined) {
+            bfsDistances[neighbor] = dist + 1;
+            queue.push([neighbor, dist + 1]);
+          }
+        }
+      }
+    }
+
     // Initialize positions using circular + distance-based layout
     const distanceGroups: Record<number, NetworkNode[]> = {};
     graphNodes.forEach((n) => {
-      const d = n.distance ?? 99;
+      let d = n.distance;
+      if (d === undefined || d === 99) {
+        if (n.is_root || n.id === rootNode) {
+          d = 0;
+        } else {
+          d = bfsDistances[n.id] ?? 1;
+        }
+      }
       if (!distanceGroups[d]) distanceGroups[d] = [];
       distanceGroups[d].push(n);
     });

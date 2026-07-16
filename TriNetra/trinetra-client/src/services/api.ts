@@ -60,6 +60,7 @@ export interface GraphEdge {
 export interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  root_node?: string;
 }
 
 export interface TrendDataPoint {
