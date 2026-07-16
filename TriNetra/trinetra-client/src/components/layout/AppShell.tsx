@@ -1,13 +1,13 @@
 import React from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { 
-  LayoutDashboard, 
-  MessageSquareText, 
-  FolderSearch, 
-  Network, 
-  BarChart3, 
-  UserX, 
-  BellRing, 
+import {
+  LayoutDashboard,
+  MessageSquareText,
+  FolderSearch,
+  Network,
+  BarChart3,
+  UserX,
+  BellRing,
   Settings as SettingsIcon,
   User,
   LogOut,
@@ -25,7 +25,6 @@ const navItems = [
   { path: '/offenders', label: 'Offender Profiles', icon: UserX },
   { path: '/alerts', label: 'Prevention Alerts', icon: BellRing },
   { path: '/profile', label: 'My Profile', icon: User },
-  { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
 export default function AppShell() {
@@ -52,7 +51,7 @@ export default function AppShell() {
           </div>
           <span className="font-semibold text-lg tracking-wide whitespace-nowrap">TriNetra</span>
         </div>
-        
+
         <nav className="flex-1 overflow-y-auto py-4 flex flex-col gap-1 px-2">
           {navItems.map((item) => (
             <NavLink
@@ -60,8 +59,8 @@ export default function AppShell() {
               to={item.path}
               className={({ isActive }) => cn(
                 "flex items-center gap-3 px-3 py-2.5 rounded-md transition-colors",
-                isActive 
-                  ? "bg-primary-800 text-accent-500 font-medium" 
+                isActive
+                  ? "bg-primary-800 text-accent-500 font-medium"
                   : "text-primary-100 hover:bg-primary-800/50 hover:text-white"
               )}
             >
@@ -70,11 +69,11 @@ export default function AppShell() {
             </NavLink>
           ))}
         </nav>
-        
+
         {/* Bottom: Real user info */}
         <div className="p-4 border-t border-primary-800">
-          <NavLink 
-            to="/profile" 
+          <NavLink
+            to="/profile"
             className="flex items-center gap-3 hover:bg-primary-800/50 rounded-lg p-2 transition-colors -mx-2"
           >
             <div className="w-9 h-9 rounded-full bg-accent-500 flex items-center justify-center text-primary-900 text-xs font-bold shrink-0">
@@ -88,7 +87,7 @@ export default function AppShell() {
               </div>
             </div>
           </NavLink>
-          <button 
+          <button
             onClick={handleLogout}
             className="mt-3 w-full flex items-center justify-center gap-2 text-xs text-primary-300 hover:text-white hover:bg-primary-800 py-2 rounded-md transition-colors"
           >
@@ -108,7 +107,7 @@ export default function AppShell() {
           <div className="hidden md:block">
             {/* Breadcrumbs or page title */}
           </div>
-          
+
           <div className="flex items-center gap-4">
             {/* Role Badge */}
             {profile && (
@@ -117,12 +116,12 @@ export default function AppShell() {
                 {profile.role} — {profile.unit_name}
               </span>
             )}
-            
+
             <button className="text-slate-500 hover:text-primary-900 transition-colors relative">
               <BellRing className="w-5 h-5" />
               <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>
             </button>
-            
+
             <NavLink to="/profile" className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-full bg-primary-900 flex items-center justify-center text-sm font-bold text-accent-500">
                 {initials}
