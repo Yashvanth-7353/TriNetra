@@ -655,3 +655,19 @@ export async function fetchPreventionAlerts(districtId?: number): Promise<Preven
   }
   return response.json();
 }
+
+export async function exportChat(messages: any[]): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/api/chat/export`, {
+    method: 'POST',
+    headers: {
+      ...authHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ messages }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to export chat session' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.blob();
+}

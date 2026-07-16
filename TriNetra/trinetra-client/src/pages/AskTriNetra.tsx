@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, FileDown, Mic, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { sendChatQuery, type ChatResponse } from '../services/api';
+import { sendChatQuery, exportChat, type ChatResponse } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 
@@ -38,6 +38,28 @@ export default function AskTriNetra() {
   const [isLoading, setIsLoading] = useState(false);
   const [lang, setLang] = useState<'EN' | 'KN'>('EN');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [isExporting, setIsExporting] = useState(false);
+
+  const handleExport = async () => {
+    if (messages.length === 0) return;
+    setIsExporting(true);
+    try {
+      const blob = await exportChat(messages);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `trinetra_intelligence_report_${Date.now()}.html`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err: any) {
+      console.error('Failed to export chat:', err);
+      alert('Failed to export chat: ' + err.message);
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -108,9 +130,27 @@ export default function AskTriNetra() {
             <Globe className="w-4 h-4" />
             {lang === 'EN' ? 'English' : 'ಕನ್ನಡ'}
           </button>
-          <button className="flex items-center gap-2 text-sm font-medium text-primary-900 bg-primary-50 hover:bg-primary-100 border border-primary-200 px-3 py-1.5 rounded-md transition-colors">
-            <FileDown className="w-4 h-4" />
-            Export PDF
+          <button 
+            onClick={handleExport}
+            disabled={isExporting || messages.length === 0}
+            className={cn(
+              "flex items-center gap-2 text-sm font-medium border px-3 py-1.5 rounded-md transition-colors",
+              messages.length === 0 
+                ? "text-slate-400 bg-slate-50 border-slate-200 cursor-not-allowed" 
+                : "text-primary-900 bg-primary-50 hover:bg-primary-100 border-primary-200"
+            )}
+          >
+            {isExporting ? (
+              <>
+                <Bot className="w-4 h-4 animate-spin" />
+                Exporting...
+              </>
+            ) : (
+              <>
+                <FileDown className="w-4 h-4" />
+                Export Report
+              </>
+            )}
           </button>
         </div>
       </div>
