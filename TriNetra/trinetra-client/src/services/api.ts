@@ -590,3 +590,42 @@ export async function fetchAnalyticsTrends(params: AnalyticsSearchParams): Promi
   }
   return response.json();
 }
+
+export interface OffenderProfile {
+  accused_id: number;
+  name: string;
+  score: number;
+  repeat_offender: boolean;
+  factors: {
+    prior_case_count?: number;
+    heinous_case_count?: number;
+    contribution_heinous?: number;
+    contribution_recency?: number;
+    contribution_prior_cases?: number;
+    most_recent_case_days_ago?: number;
+  };
+  computed_date: string;
+}
+
+export interface OffendersResponse {
+  status: string;
+  offenders: OffenderProfile[];
+  total: number;
+}
+
+export async function fetchOffendersList(search?: string, page: number = 1, pageSize: number = 20): Promise<OffendersResponse> {
+  const queryParts: string[] = [];
+  if (search) queryParts.push(`search=${encodeURIComponent(search)}`);
+  queryParts.push(`page=${page}`);
+  queryParts.push(`page_size=${pageSize}`);
+  const qs = `?${queryParts.join('&')}`;
+
+  const response = await fetch(`${API_BASE}/api/analytics/offenders${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to load offender list' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}

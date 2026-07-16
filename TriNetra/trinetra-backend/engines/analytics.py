@@ -233,3 +233,70 @@ class AnalyticsEngine:
             }
         except Exception as e:
             return {"error": str(e)}
+
+    def get_offenders(self, search=None, limit=50, offset=0) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            
+            conditions = []
+            params = []
+            if search:
+                conditions.append("(a.AccusedName ILIKE %s OR CAST(ors.AccusedMasterID AS TEXT) ILIKE %s)")
+                params.extend([f"%{search}%", f"%{search}%"])
+            
+            where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+            
+            count_sql = f"""
+                SELECT COUNT(*)
+                FROM OffenderRiskScore ors
+                JOIN Accused a ON ors.AccusedMasterID = a.AccusedMasterID
+                {where_clause}
+            """
+            cur.execute(count_sql, params)
+            total = cur.fetchone()[0]
+            
+            data_sql = f"""
+                SELECT 
+                    ors.AccusedMasterID, 
+                    a.AccusedName,
+                    ors.RiskScore,
+                    ors.RepeatOffenderFlag,
+                    ors.TopFactors,
+                    ors.LastComputedDate
+                FROM OffenderRiskScore ors
+                JOIN Accused a ON ors.AccusedMasterID = a.AccusedMasterID
+                {where_clause}
+                ORDER BY ors.RiskScore DESC, ors.AccusedMasterID ASC
+                LIMIT %s OFFSET %s
+            """
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall()
+            
+            offenders = []
+            for r in rows:
+                factors = r[4]
+                if isinstance(factors, str):
+                    try:
+                        factors = json.loads(factors)
+                    except:
+                        factors = {}
+                
+                offenders.append({
+                    "accused_id": r[0],
+                    "name": r[1],
+                    "score": float(r[2]),
+                    "repeat_offender": bool(r[3]),
+                    "factors": factors,
+                    "computed_date": str(r[5])
+                })
+                
+            cur.close()
+            conn.close()
+            
+            return {
+                "offenders": offenders,
+                "total": total
+            }
+        except Exception as e:
+            return {"error": str(e)}
