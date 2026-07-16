@@ -214,16 +214,16 @@ export default function LandingPage() {
                 {/* Dev 1 */}
                 <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-800 hover:border-slate-700 transition-colors">
                   <h5 className="text-white font-bold text-sm mb-1">Yashvanth M U</h5>
-                  <p className="text-xs text-accent-500 font-medium mb-1">Software Engineer</p>
+                  <p className="text-xs text-accent-500 font-medium mb-1">ISE Student</p>
                   <p className="text-xs text-slate-500 mb-4">RV College of Engineering</p>
                   <div className="flex gap-2">
-                    <a href="https://github.com" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
+                    <a href="https://github.com/Yashvanth-7353" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
                       <Code size={14} />
                     </a>
-                    <a href="https://linkedin.com" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
+                    <a href="https://www.linkedin.com/in/yashvanth-m-u-720598282/" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
                       <Briefcase size={14} />
                     </a>
-                    <a href="https://portfolio.com" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
+                    <a href="https://yashvanth.pages.dev/" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
                       <Globe size={14} />
                     </a>
                   </div>
@@ -232,16 +232,16 @@ export default function LandingPage() {
                 {/* Dev 2 */}
                 <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-800 hover:border-slate-700 transition-colors">
                   <h5 className="text-white font-bold text-sm mb-1">Swamy B S</h5>
-                  <p className="text-xs text-accent-500 font-medium mb-1">Software Engineer</p>
+                  <p className="text-xs text-accent-500 font-medium mb-1">ISE Student</p>
                   <p className="text-xs text-slate-500 mb-4">RV College of Engineering</p>
                   <div className="flex gap-2">
-                    <a href="https://github.com" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
+                    <a href="https://github.com/SwamyBS-codes" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
                       <Code size={14} />
                     </a>
-                    <a href="https://linkedin.com" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
+                    <a href="https://www.linkedin.com/in/swamy-b-s-86613628b/" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
                       <Briefcase size={14} />
                     </a>
-                    <a href="https://portfolio.com" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
+                    <a href="https://swamybs-dev.vercel.app/" target="_blank" rel="noreferrer" className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center hover:bg-accent-500 hover:text-primary-900 transition-all text-slate-400">
                       <Globe size={14} />
                     </a>
                   </div>
