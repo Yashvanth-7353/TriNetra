@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search, Eye, FileText, Calendar, MapPin, X, Loader2, AlertCircle,
   ChevronLeft, ChevronRight, Filter, SlidersHorizontal, Users, Clock,
@@ -63,6 +64,9 @@ function SkeletonRow() {
 //  MAIN COMPONENT
 // ═══════════════════════════════════════════════
 export default function CaseExplorer() {
+  const [searchParams] = useSearchParams();
+  const urlSearch = searchParams.get('search');
+
   // ─── Filter State ───
   const [filters, setFilters] = useState<CaseFilterOptions | null>(null);
   const [districtId, setDistrictId] = useState<number | undefined>();
@@ -99,7 +103,7 @@ export default function CaseExplorer() {
   }, [districtId, statusId, categoryId, crimeHeadId, dateFrom, dateTo]);
 
   // ─── Search function ───
-  const doSearch = useCallback(async (page: number = 1) => {
+  const doSearch = useCallback(async (page: number = 1, overrideSearch?: string) => {
     setIsLoading(true);
     setError('');
     setHasSearched(true);
@@ -114,7 +118,9 @@ export default function CaseExplorer() {
     if (crimeHeadId) params.crime_head_id = crimeHeadId;
     if (dateFrom) params.date_from = dateFrom;
     if (dateTo) params.date_to = dateTo;
-    if (searchTerm.trim()) params.search = searchTerm.trim();
+    
+    const actualSearch = overrideSearch !== undefined ? overrideSearch : searchTerm;
+    if (actualSearch.trim()) params.search = actualSearch.trim();
 
     try {
       const result = await searchCasesAPI(params);
@@ -127,6 +133,14 @@ export default function CaseExplorer() {
       setIsLoading(false);
     }
   }, [districtId, statusId, categoryId, crimeHeadId, dateFrom, dateTo, searchTerm]);
+
+  // ─── Auto-search from URL ───
+  useEffect(() => {
+    if (urlSearch) {
+      setSearchTerm(urlSearch);
+      doSearch(1, urlSearch);
+    }
+  }, [urlSearch, doSearch]);
 
   // ─── Open Detail Drawer ───
   const openDetail = async (caseId: number) => {

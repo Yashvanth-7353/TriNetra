@@ -219,7 +219,7 @@ export default function PatternAnalytics() {
                               {c.brief_facts}
                             </p>
                           </div>
-                          <Link to={`/cases?id=${c.case_id}`} className="mt-2 text-indigo-600 hover:text-indigo-800 p-2 rounded-full hover:bg-indigo-50 transition-colors shrink-0">
+                          <Link to={`/cases?search=${encodeURIComponent(c.crime_no)}`} className="mt-2 text-indigo-600 hover:text-indigo-800 p-2 rounded-full hover:bg-indigo-50 transition-colors shrink-0">
                             <ChevronRight className="w-5 h-5" />
                           </Link>
                         </div>
@@ -306,7 +306,7 @@ export default function PatternAnalytics() {
 
                     <div className="pr-24">
                       <div className="flex items-center gap-2 mb-2">
-                        <Link to={`/cases?id=${sc.case_id}`} className="font-bold text-indigo-700 hover:underline text-lg">
+                        <Link to={`/cases?search=${encodeURIComponent(sc.crime_no)}`} className="font-bold text-indigo-700 hover:underline text-lg">
                           {sc.crime_no}
                         </Link>
                         <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded">ID: {sc.case_id}</span>
