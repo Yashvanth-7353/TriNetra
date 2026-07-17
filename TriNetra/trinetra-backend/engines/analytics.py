@@ -258,7 +258,7 @@ class AnalyticsEngine:
         except Exception as e:
             return {"error": str(e)}
 
-    def get_offenders(self, search=None, limit=50, offset=0) -> dict:
+    def get_offenders(self, search=None, limit=50, offset=0, unit_id=None, district_id=None, sort_key="score", sort_order="desc") -> dict:
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
@@ -268,6 +268,13 @@ class AnalyticsEngine:
             if search:
                 conditions.append("(a.AccusedName ILIKE %s OR CAST(ors.AccusedMasterID AS TEXT) ILIKE %s)")
                 params.extend([f"%{search}%", f"%{search}%"])
+                
+            if unit_id:
+                conditions.append("EXISTS (SELECT 1 FROM Accused sub_a JOIN CaseMaster sub_cm ON sub_a.CaseMasterID = sub_cm.CaseMasterID WHERE sub_a.AccusedMasterID = ors.AccusedMasterID AND sub_cm.PoliceStationID = %s)")
+                params.append(unit_id)
+            elif district_id:
+                conditions.append("EXISTS (SELECT 1 FROM Accused sub_a JOIN CaseMaster sub_cm ON sub_a.CaseMasterID = sub_cm.CaseMasterID JOIN Unit sub_u ON sub_cm.PoliceStationID = sub_u.UnitID WHERE sub_a.AccusedMasterID = ors.AccusedMasterID AND sub_u.DistrictID = %s)")
+                params.append(district_id)
             
             where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
             
@@ -280,6 +287,16 @@ class AnalyticsEngine:
             cur.execute(count_sql, params)
             total = cur.fetchone()[0]
             
+            sort_field = "ors.RiskScore"
+            if sort_key == "name":
+                sort_field = "a.AccusedName"
+            elif sort_key == "repeat_offender":
+                sort_field = "ors.RepeatOffenderFlag"
+            elif sort_key == "prior_case_count":
+                sort_field = "ors.RepeatOffenderFlag" # Safe fallback for JSON field
+                
+            order = "ASC" if sort_order == "asc" else "DESC"
+            
             data_sql = f"""
                 SELECT 
                     ors.AccusedMasterID, 
@@ -291,7 +308,7 @@ class AnalyticsEngine:
                 FROM OffenderRiskScore ors
                 JOIN Accused a ON ors.AccusedMasterID = a.AccusedMasterID
                 {where_clause}
-                ORDER BY ors.RiskScore DESC, ors.AccusedMasterID ASC
+                ORDER BY {sort_field} {order}, ors.AccusedMasterID ASC
                 LIMIT %s OFFSET %s
             """
             cur.execute(data_sql, params + [limit, offset])

@@ -745,11 +745,19 @@ export interface OffendersResponse {
   total: number;
 }
 
-export async function fetchOffendersList(search?: string, page: number = 1, pageSize: number = 20): Promise<OffendersResponse> {
+export async function fetchOffendersList(
+  search?: string, 
+  page: number = 1, 
+  pageSize: number = 20,
+  sortKey: string = 'score',
+  sortOrder: string = 'desc'
+): Promise<OffendersResponse> {
   const queryParts: string[] = [];
   if (search) queryParts.push(`search=${encodeURIComponent(search)}`);
   queryParts.push(`page=${page}`);
   queryParts.push(`page_size=${pageSize}`);
+  queryParts.push(`sort_key=${sortKey}`);
+  queryParts.push(`sort_order=${sortOrder}`);
   const qs = `?${queryParts.join('&')}`;
 
   const response = await fetch(`${API_BASE}/api/analytics/offenders${qs}`, {

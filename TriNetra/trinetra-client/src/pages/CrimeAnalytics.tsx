@@ -192,11 +192,15 @@ export default function CrimeAnalytics() {
 
       {/* KPI Cards Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-        <KPICard title="Total Active Cases" value={summary?.total_cases?.toLocaleString()} icon={TrendingUp} color="text-primary-600" bg="bg-primary-50" />
-        <KPICard title="MoM Case Vol." value={summary?.biggest_mom_change} icon={Calendar} color="text-rose-600" bg="bg-rose-50" />
-        <KPICard title="Arrest Rate" value={`${summary?.arrest_rate || 0}%`} icon={Shield} color="text-emerald-600" bg="bg-emerald-50" />
-        <KPICard title="Avg Days to CS" value={summary?.avg_days_to_chargesheet || 0} icon={Clock} color="text-amber-600" bg="bg-amber-50" />
-        <KPICard title="Highest Activity" value={summary?.highest_activity_district || 'N/A'} icon={MapPin} color="text-violet-600" bg="bg-violet-50" />
+        {isLoading ? Array.from({length: 5}).map((_, i) => <KPISkeleton key={i} />) : (
+          <>
+            <KPICard title="Total Active Cases" value={summary?.total_cases?.toLocaleString()} icon={TrendingUp} color="text-primary-600" bg="bg-primary-50" />
+            <KPICard title="MoM Case Vol." value={summary?.biggest_mom_change} icon={Calendar} color="text-rose-600" bg="bg-rose-50" />
+            <KPICard title="Arrest Rate" value={`${summary?.arrest_rate || 0}%`} icon={Shield} color="text-emerald-600" bg="bg-emerald-50" />
+            <KPICard title="Avg Days to CS" value={summary?.avg_days_to_chargesheet || 0} icon={Clock} color="text-amber-600" bg="bg-amber-50" />
+            <KPICard title="Highest Activity" value={summary?.highest_activity_district || 'N/A'} icon={MapPin} color="text-violet-600" bg="bg-violet-50" />
+          </>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -206,7 +210,7 @@ export default function CrimeAnalytics() {
             <MapPin className="w-5 h-5 text-slate-500" /> Statewide Hotspot Density
           </h2>
           <div className="flex-1 bg-slate-100 rounded-lg overflow-hidden border border-slate-200 relative">
-            <MapContainer center={KARNATAKA_CENTER} zoom={6} className="w-full h-full absolute inset-0 z-0">
+            <ChartLoader isLoading={isLoading}><MapContainer center={KARNATAKA_CENTER} zoom={6} className="w-full h-full absolute inset-0 z-0">
               <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
               {geoData?.grid?.map((pt: any, i: number) => (
                 <CircleMarker
@@ -229,7 +233,7 @@ export default function CrimeAnalytics() {
                   </Popup>
                 </CircleMarker>
               ))}
-            </MapContainer>
+            </MapContainer></ChartLoader>
           </div>
         </div>
 
@@ -239,18 +243,19 @@ export default function CrimeAnalytics() {
             <Activity className="w-5 h-5 text-slate-500" /> District Rankings
           </h2>
           <div className="overflow-y-auto flex-1 pr-2 space-y-3 custom-scrollbar">
-            {geoData?.rankings?.map((d: any, idx: number) => (
+            {isLoading ? Array.from({length: 4}).map((_, i) => <div key={i} className="h-16 bg-slate-100 animate-pulse rounded-lg" />) : 
+              geoData?.rankings?.map((d: any, idx: number) => (
               <div key={d.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100 flex items-center justify-between">
                 <div>
                   <div className="text-sm font-bold text-slate-800">{idx + 1}. {d.name}</div>
                   <div className="text-xs text-slate-500">{d.total.toLocaleString()} total</div>
                 </div>
                 <div className="w-24 h-10">
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
                     <LineChart data={d.sparkline}>
                       <Line type="monotone" dataKey="count" stroke="#2563eb" strokeWidth={2} dot={false} />
                     </LineChart>
-                  </ResponsiveContainer>
+                  </ResponsiveContainer></ChartLoader>
                 </div>
               </div>
             ))}
@@ -263,7 +268,7 @@ export default function CrimeAnalytics() {
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
           <h2 className="text-lg font-bold text-slate-800 mb-4">YoY Category Comparison</h2>
           <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
+            <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
               <BarChart data={yoyTransformed.data}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="category" tick={{fontSize: 12}} />
@@ -274,7 +279,7 @@ export default function CrimeAnalytics() {
                   <Bar key={year} dataKey={year} fill={COLORS[i % COLORS.length]} radius={[4,4,0,0]} />
                 ))}
               </BarChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer></ChartLoader>
           </div>
         </div>
 
@@ -284,7 +289,7 @@ export default function CrimeAnalytics() {
             <TrendingUp className="w-5 h-5" /> Statewide Monthly Registration Trend
           </h2>
           <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
+            <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
               <AreaChart data={trendsData?.monthly_trend || []}>
                 <defs>
                   <linearGradient id="colorAna" x1="0" y1="0" x2="0" y2="1">
@@ -298,7 +303,7 @@ export default function CrimeAnalytics() {
                 <RechartsTooltip />
                 <Area type="monotone" dataKey="count" stroke="#2563eb" fillOpacity={1} fill="url(#colorAna)" />
               </AreaChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer></ChartLoader>
           </div>
         </div>
       </div>
@@ -308,7 +313,7 @@ export default function CrimeAnalytics() {
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
           <h2 className="text-lg font-bold text-slate-800 mb-4">Crime Head Distribution</h2>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
+            <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={categoricalData?.heads || []} innerRadius={40} outerRadius={70} dataKey="value" nameKey="name" cx="50%" cy="50%">
                   {(categoricalData?.heads || []).map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
@@ -316,14 +321,14 @@ export default function CrimeAnalytics() {
                 <RechartsTooltip />
                 <Legend layout="horizontal" verticalAlign="bottom" wrapperStyle={{ fontSize: '10px' }} />
               </PieChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer></ChartLoader>
           </div>
         </div>
 
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
           <h2 className="text-lg font-bold text-slate-800 mb-4">Gravity Split</h2>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
+            <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={categoricalData?.gravity || []} innerRadius={0} outerRadius={80} dataKey="value" nameKey="name" cx="50%" cy="50%">
                   {(categoricalData?.gravity || []).map((_: any, i: number) => <Cell key={i} fill={['#ef4444', '#f59e0b', '#3b82f6'][i%3]} />)}
@@ -331,7 +336,7 @@ export default function CrimeAnalytics() {
                 <RechartsTooltip />
                 <Legend />
               </PieChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer></ChartLoader>
           </div>
         </div>
 
@@ -339,7 +344,7 @@ export default function CrimeAnalytics() {
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
           <h2 className="text-lg font-bold text-slate-800 mb-4">Top Modus Operandi</h2>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
+            <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
               <BarChart data={categoricalData?.mo_tags || []} layout="vertical" margin={{ left: 20 }}>
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} />
                 <XAxis type="number" />
@@ -347,7 +352,7 @@ export default function CrimeAnalytics() {
                 <RechartsTooltip />
                 <Bar dataKey="count" fill="#8b5cf6" radius={[0,4,4,0]} />
               </BarChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer></ChartLoader>
           </div>
         </div>
       </div>
@@ -357,7 +362,7 @@ export default function CrimeAnalytics() {
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
           <h2 className="text-lg font-bold text-slate-800 mb-4">Case Lifecycle Status</h2>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
+            <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
               <BarChart data={lifecycleData?.funnel ? [...lifecycleData.funnel].sort((a:any, b:any)=>b.value-a.value) : []}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="name" tick={{fontSize: 11}} />
@@ -365,7 +370,7 @@ export default function CrimeAnalytics() {
                 <RechartsTooltip />
                 <Bar dataKey="value" fill="#0f766e" radius={[4,4,0,0]} />
               </BarChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer></ChartLoader>
           </div>
         </div>
 
@@ -375,7 +380,7 @@ export default function CrimeAnalytics() {
             <Clock className="w-5 h-5 text-amber-600" /> FIR Reporting Lag (Incident to Reg)
           </h2>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
+            <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
               <BarChart data={lagData?.lag || []}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="bucket" tick={{fontSize: 11}} />
@@ -383,7 +388,7 @@ export default function CrimeAnalytics() {
                 <RechartsTooltip />
                 <Bar dataKey="count" fill="#d97706" radius={[4,4,0,0]} />
               </BarChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer></ChartLoader>
           </div>
         </div>
       </div>
@@ -399,7 +404,7 @@ export default function CrimeAnalytics() {
           </span>
         </div>
         <div className="h-[300px]">
-          <ResponsiveContainer width="100%" height="100%">
+          <ChartLoader isLoading={isLoading}><ResponsiveContainer width="100%" height="100%">
             <BarChart data={demoTransformed.data} layout="vertical" margin={{ left: 30 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} />
               <XAxis type="number" />
@@ -410,7 +415,7 @@ export default function CrimeAnalytics() {
                 <Bar key={gender} dataKey={gender} stackId="a" fill={COLORS[i % COLORS.length]} />
               ))}
             </BarChart>
-          </ResponsiveContainer>
+          </ResponsiveContainer></ChartLoader>
         </div>
       </div>
 
@@ -432,4 +437,22 @@ function KPICard({ title, value, icon: Icon, color, bg }: any) {
       </div>
     </div>
   );
+}
+
+
+function KPISkeleton() {
+  return (
+    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4 animate-pulse">
+      <div className="w-12 h-12 bg-slate-200 rounded-xl shrink-0" />
+      <div className="flex flex-col gap-2 flex-1">
+        <div className="h-3 bg-slate-200 rounded w-24" />
+        <div className="h-5 bg-slate-200 rounded w-16" />
+      </div>
+    </div>
+  );
+}
+
+function ChartLoader({ isLoading, children, className = "h-full" }: { isLoading: boolean, children: React.ReactNode, className?: string }) {
+  if (isLoading) return <div className={`w-full ${className} bg-slate-100 animate-pulse rounded-lg`} />;
+  return <>{children}</>;
 }

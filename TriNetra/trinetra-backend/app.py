@@ -186,11 +186,27 @@ async def get_analytics_trends(
 async def get_analytics_offenders(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100)
+    page_size: int = Query(20, ge=1, le=100),
+    sort_key: Optional[str] = Query("score"),
+    sort_order: Optional[str] = Query("desc"),
+    authorization: Optional[str] = Header(None)
 ):
     """Returns paginated, searchable list of offender profiles and risk scores."""
+    try:
+        payload = verify_jwt_token(authorization)
+        profile = get_employee_profile(payload["employee_id"])
+        unit_id = profile.get("station_id")
+        district_id = profile.get("district_id")
+    except Exception:
+        unit_id = None
+        district_id = None
+
     offset = (page - 1) * page_size
-    result = analytics_engine.get_offenders(search=search, limit=page_size, offset=offset)
+    result = analytics_engine.get_offenders(
+        search=search, limit=page_size, offset=offset,
+        unit_id=unit_id, district_id=district_id,
+        sort_key=sort_key, sort_order=sort_order
+    )
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
     return {"status": "success", **result}
