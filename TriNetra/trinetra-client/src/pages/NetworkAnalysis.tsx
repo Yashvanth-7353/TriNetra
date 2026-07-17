@@ -187,11 +187,10 @@ export default function NetworkAnalysis() {
                   <button
                     key={h}
                     onClick={() => setHops(h)}
-                    className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${
-                      hops === h
-                        ? 'bg-primary-900 text-white shadow-sm'
-                        : 'text-slate-500 hover:text-slate-700'
-                    }`}
+                    className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${hops === h
+                      ? 'bg-primary-900 text-white shadow-sm'
+                      : 'text-slate-500 hover:text-slate-700'
+                      }`}
                   >
                     {h}-hop
                   </button>
@@ -232,7 +231,7 @@ export default function NetworkAnalysis() {
                 value={searchQuery}
                 onChange={(e) => handleSearchInput(e.target.value)}
                 onFocus={() => searchResults.length > 0 && setShowDropdown(true)}
-                placeholder="Search by accused name or ID (e.g. 'Shetty', '80', 'Kumar')..."
+                placeholder="Search by accused ID (e.g. '3682' for OTP Ring, '3635' for MV Theft)..."
                 className="w-full h-12 pl-11 pr-28 rounded-xl border border-slate-200 shadow-sm focus:outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 text-sm bg-white transition-all"
                 disabled={graphLoading}
               />
@@ -393,9 +392,9 @@ export default function NetworkAnalysis() {
                 <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Try these searches</div>
                 <div className="space-y-2">
                   {[
-                    { id: 80, label: 'Accused ID 80', desc: 'Multi-hop syndicate with financial links' },
-                    { id: 104, label: 'Accused ID 104', desc: 'Cross-district criminal network' },
-                    { id: 6, label: 'Accused ID 6', desc: 'Repeat offender with shared MO patterns' },
+                    { id: 3682, label: 'Accused 62 (Shankar Sheikh)', desc: 'Rich network: co-accused + shared Victims + shared MO' },
+                    { id: 3635, label: 'Accused 3635 (Radha Reddy)', desc: 'Interstate MV Theft Ring (co-accused + shared MO)' },
+                    { id: 3559, label: 'Accused 82 (Ayesha Reddy)', desc: 'Isolated offender (tests empty state)' },
                   ].map((ex) => (
                     <button
                       key={ex.id}
@@ -490,19 +489,17 @@ export default function NetworkAnalysis() {
               <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
                 {/* Risk Score */}
                 {nodeDetail.risk && (
-                  <div className={`rounded-xl border p-4 ${
-                    nodeDetail.risk.score >= 70 ? 'bg-red-50 border-red-200' :
+                  <div className={`rounded-xl border p-4 ${nodeDetail.risk.score >= 70 ? 'bg-red-50 border-red-200' :
                     nodeDetail.risk.score >= 40 ? 'bg-amber-50 border-amber-200' :
-                    'bg-green-50 border-green-200'
-                  }`}>
+                      'bg-green-50 border-green-200'
+                    }`}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1">
                         <BarChart3 className="w-3.5 h-3.5" /> Risk Score
                       </span>
-                      <span className={`text-2xl font-black ${
-                        nodeDetail.risk.score >= 70 ? 'text-red-600' :
+                      <span className={`text-2xl font-black ${nodeDetail.risk.score >= 70 ? 'text-red-600' :
                         nodeDetail.risk.score >= 40 ? 'text-amber-600' : 'text-green-600'
-                      }`}>
+                        }`}>
                         {nodeDetail.risk.score}
                         <span className="text-xs font-medium text-slate-400">/100</span>
                       </span>

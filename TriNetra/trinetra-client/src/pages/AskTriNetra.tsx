@@ -24,12 +24,16 @@ export interface Message {
 }
 
 const examplePrompts = [
-  "How many FIRs were registered in Mysuru?",
-  "Show me the network for accused 80",
-  "Show me the crime trend over time",
-  "What is the risk score for Accused 104?",
-  "Search for cases involving mobile phone theft",
-  "List active prevention alerts for fraud"
+  "How many cases were registered in Bengaluru Urban in 2025?",
+  "Show me chain snatching cases in Bengaluru Urban from October to December 2025.",
+  "Are there any cases involving a fraudulent online transaction near Mysuru?",
+  "Who is connected to accused 3682?",
+  "How has cyber crime changed in Bengaluru Urban over the last two years?",
+  "Is there anything unusual happening with digital arrest scams recently?",
+  "Find cases similar to CaseMasterID 2817.",
+  "What is the risk profile for accused 3682?",
+  "Find cases similar to CaseMasterID 9",
+  "Summarize the most recent one."
 ];
 
 export default function AskTriNetra() {

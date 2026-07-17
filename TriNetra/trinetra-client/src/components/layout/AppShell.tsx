@@ -46,12 +46,12 @@ export default function AppShell() {
     <div className="flex h-screen w-full bg-white text-slate-900">
       {/* Sidebar */}
       <aside className="w-64 bg-primary-900 text-white flex flex-col transition-all duration-300 hidden md:flex shrink-0">
-        <div className="p-4 flex items-center gap-3 border-b border-primary-800">
+        <Link to="/" className="p-4 flex items-center gap-3 border-b border-primary-800 hover:bg-primary-800 transition-colors cursor-pointer">
           <div className="w-8 h-8 bg-accent-500 rounded-full flex items-center justify-center shrink-0">
             <span className="font-bold text-primary-900 text-xs">TN</span>
           </div>
           <span className="font-semibold text-lg tracking-wide whitespace-nowrap">TriNetra</span>
-        </div>
+        </Link>
 
         <nav className="flex-1 overflow-y-auto py-4 flex flex-col gap-1 px-2">
           {navItems.map((item) => (
