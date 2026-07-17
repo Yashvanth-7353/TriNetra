@@ -24,16 +24,14 @@ export interface Message {
 }
 
 const examplePrompts = [
-  "How many cases were registered in Bengaluru Urban in 2025?",
-  "Show me chain snatching cases in Bengaluru Urban from October to December 2025.",
-  "Are there any cases involving a fraudulent online transaction near Mysuru?",
-  "Who is connected to accused 3682?",
-  "How has cyber crime changed in Bengaluru Urban over the last two years?",
-  "Is there anything unusual happening with digital arrest scams recently?",
-  "Find cases similar to CaseMasterID 2817.",
-  "What is the risk profile for accused 3682?",
-  "Find cases similar to CaseMasterID 9",
-  "Summarize the most recent one."
+  { q: "How many cases were registered in Bengaluru Urban in 2025?", desc: "proves tier-4 factual sql generation" },
+  { q: "Are there any cases involving a fraudulent online transaction near Mysuru?", desc: "proves narrative rag" },
+  { q: "Who is connected to accused 3682?", desc: "proves graph triggering & inline canvas embedding" },
+  { q: "How has cyber crime changed in Bengaluru Urban over the last two years?", desc: "proves dynamic trend analysis engine" },
+  { q: "Is there anything unusual happening with digital arrest scams recently?", desc: "proves early warning/pattern search" },
+  { q: "Find cases similar to CaseMasterID 2817.", desc: "proves tri-signal pgvector case similarity engine" },
+  { q: "What is the risk profile for accused 3682?", desc: "proves risk scoring" },
+  { q: "Find cases similar to CaseMasterID 9", desc: "proves similarity works even with 0 named suspects" }
 ];
 
 export default function AskTriNetra() {
@@ -177,10 +175,11 @@ export default function AskTriNetra() {
                 {examplePrompts.map((prompt, i) => (
                   <button 
                     key={i}
-                    onClick={() => handleSendMessage(prompt)}
-                    className="text-left p-4 rounded-xl border border-slate-200 bg-white hover:border-accent-500 hover:shadow-md transition-all text-sm font-medium text-slate-700"
+                    onClick={() => handleSendMessage(prompt.q)}
+                    className="text-left p-4 rounded-xl border border-slate-200 bg-white hover:border-accent-500 hover:shadow-md transition-all group"
                   >
-                    {prompt}
+                    <div className="text-sm font-medium text-slate-700 group-hover:text-primary-900">{prompt.q}</div>
+                    <div className="text-[10px] text-slate-400 mt-2 uppercase tracking-wide">({prompt.desc})</div>
                   </button>
                 ))}
               </div>
