@@ -12,10 +12,10 @@ import AskTriNetra from './pages/AskTriNetra';
 import CaseExplorer from './pages/CaseExplorer';
 import NetworkAnalysis from './pages/NetworkAnalysis';
 import CrimeAnalytics from './pages/CrimeAnalytics';
+import PatternAnalytics from './pages/PatternAnalytics';
 import OffenderProfiles from './pages/OffenderProfiles';
 import PreventionAlerts from './pages/PreventionAlerts';
 import Profile from './pages/Profile';
-
 
 function App() {
   return (
@@ -31,6 +31,7 @@ function App() {
         <Route path="/cases" element={<CaseExplorer />} />
         <Route path="/network" element={<NetworkAnalysis />} />
         <Route path="/analytics" element={<CrimeAnalytics />} />
+        <Route path="/pattern-analytics" element={<PatternAnalytics />} />
         <Route path="/offenders" element={<OffenderProfiles />} />
         <Route path="/alerts" element={<PreventionAlerts />} />
         

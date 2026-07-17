@@ -811,3 +811,63 @@ export async function exportChat(messages: any[]): Promise<Blob> {
   }
   return response.blob();
 }
+
+// ──────────────────────────────────────────────
+//  Pattern Analytics Interfaces
+// ──────────────────────────────────────────────
+
+export interface PatternCase {
+  case_id: number;
+  crime_no: string;
+  brief_facts: string;
+  date: string;
+  lat: number | null;
+  lng: number | null;
+  district: number;
+}
+
+export interface Pattern {
+  cluster_id: string;
+  theme: string;
+  case_count: number;
+  date_range: string;
+  districts: number[];
+  trigger_reason: string;
+  sparkline: { time: string; count: number }[];
+  cases: PatternCase[];
+  mo_tags: { name: string; strength: string }[];
+}
+
+export interface PatternFeedResponse {
+  status: string;
+  patterns?: Pattern[];
+}
+
+export interface SimilarCase {
+  case_id: number;
+  crime_no: string;
+  brief_facts: string;
+  match_score: number;
+  explanations: string[];
+}
+
+export interface SimilarCasesResponse {
+  status: string;
+  similar_cases?: SimilarCase[];
+}
+
+export async function fetchEmergingPatterns(): Promise<PatternFeedResponse> {
+  const response = await fetch(`${API_BASE}/api/patterns`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) throw new Error('Failed to load patterns');
+  return response.json();
+}
+
+export async function fetchSimilarCases(caseId: number, k: number = 10): Promise<SimilarCasesResponse> {
+  const response = await fetch(`${API_BASE}/api/patterns/similar/${caseId}?k=${k}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) throw new Error('Failed to load similar cases');
+  return response.json();
+}

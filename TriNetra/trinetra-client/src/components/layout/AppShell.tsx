@@ -10,7 +10,8 @@ import {
   BellRing,
   User,
   LogOut,
-  Shield
+  Shield,
+  Layers
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../context/AuthContext';
@@ -21,6 +22,7 @@ const navItems = [
   { path: '/cases', label: 'Case Explorer', icon: FolderSearch },
   { path: '/network', label: 'Network Analysis', icon: Network },
   { path: '/analytics', label: 'Crime Analytics', icon: BarChart3 },
+  { path: '/pattern-analytics', label: 'Pattern Analytics', icon: Layers },
   { path: '/offenders', label: 'Offender Profiles', icon: UserX },
   { path: '/alerts', label: 'Prevention Alerts', icon: BellRing },
   { path: '/profile', label: 'My Profile', icon: User },

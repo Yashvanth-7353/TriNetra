@@ -20,6 +20,8 @@ graph_engine = GraphEngine()
 from engines.analytics import AnalyticsEngine
 analytics_engine = AnalyticsEngine()
 from engines.case_explorer import CaseExplorerEngine
+from engines.pattern_engine import PatternEngine
+pattern_engine = PatternEngine()
 case_explorer_engine = CaseExplorerEngine()
 from engines.network_engine import NetworkEngine
 network_engine = NetworkEngine()
@@ -211,6 +213,32 @@ async def get_analytics_offenders(
         raise HTTPException(status_code=500, detail=result["error"])
     return {"status": "success", **result}
 
+# ──────────────────────────────────────────────
+#  Pattern Analytics Endpoints
+# ──────────────────────────────────────────────
+
+@app.get("/api/patterns")
+async def get_emerging_patterns(
+    authorization: Optional[str] = Header(None)
+):
+    """Returns the dynamic feed of emerging case clusters and patterns."""
+    result = pattern_engine.get_emerging_patterns()
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/patterns/similar/{case_id}")
+async def get_similar_cases(
+    case_id: int,
+    k: int = Query(10, ge=1, le=50),
+    authorization: Optional[str] = Header(None)
+):
+    """Returns ranked list of similar cases using pgvector, MO overlap, and geo-proximity."""
+    result = pattern_engine.find_similar_cases(case_id=case_id, k=k)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
 
 @app.get("/api/analytics/alerts")
 async def get_analytics_alerts(
