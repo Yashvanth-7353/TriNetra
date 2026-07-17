@@ -83,7 +83,9 @@ class NL2SQLEngine:
             return {"error": "Security Constraint Violation: Only data read (SELECT) sequences are permitted."}
 
         # Guardrail Tier 3: Whitelist Boundary Matching Validation
-        table_tokens = re.findall(r'from\s+([a-zA-Z_0-9]+)|join\s+([a-zA-Z_0-9]+)', clean_query)
+        # Strip EXTRACT(...) functions to prevent 'from cm.date' being parsed as a table 'cm'
+        query_for_parsing = re.sub(r'extract\s*\([^)]+from[^)]+\)', '', clean_query)
+        table_tokens = re.findall(r'\bfrom\s+([a-zA-Z_0-9]+)|\bjoin\s+([a-zA-Z_0-9]+)', query_for_parsing)
         extracted_tables = {t for tup in table_tokens for t in tup if t}
 
         for table in extracted_tables:

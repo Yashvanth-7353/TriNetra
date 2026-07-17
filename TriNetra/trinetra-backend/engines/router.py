@@ -43,18 +43,19 @@ class IntentRouter:
 
     def classify_intent(self, query: str) -> dict:
         """
-        Classifies a standalone query into one of four core orchestration engines.
+        Classifies a standalone query into one of six core orchestration engines.
         """
         if not self.groq_client:
             return {"engine": "factual_lookup", "reasoning": "Fallback mode active."}
 
         prompt = f"""
         Analyze the incoming standalone investigator query and categorize it into EXACTLY one engine layer:
-        1. 'factual_lookup': Filtering records, counting rows, dates, statuses (e.g., "List cases in Mysuru").
+        1. 'factual_lookup': Filtering records, exact counts, dates, specific statuses, or specific years (e.g., "How many cases in 2025?", "List cases in Mysuru").
         2. 'criminal_network': Exploring co-accused, syndicates, or money trails.
-        3. 'trend_analysis': Asking for a chart, graph, or timeline of crime rates over time (e.g., "Show me the crime trend", "Spike in thefts this year").
+        3. 'trend_analysis': Asking for a chart, graph, or visual timeline of crime rates over time (e.g., "Show me the crime trend", "Spike in thefts this year").
         4. 'risk_profile': Asking for the danger level, risk score, or profile of a specific criminal (e.g., "What is the risk score for Accused 80?").
-        5. 'narrative_rag': Fuzzy semantic story searches over case summaries.
+        5. 'case_similarity': Explicitly asking to find similar cases, pattern matches, or comparing a specific case ID against others (e.g., "Find cases similar to CaseMasterID 2817", "digital arrest scams recently").
+        6. 'narrative_rag': Fuzzy semantic story searches over case summaries (e.g., "online transaction near Mysuru").
 
         Query: "{query}"
 
@@ -69,7 +70,7 @@ class IntentRouter:
                 response_format={"type": "json_object"}
             )
             result = json.loads(response.choices[0].message.content)
-            valid_engines = ["factual_lookup", "criminal_network", "trend_analysis", "risk_profile", "narrative_rag"]
+            valid_engines = ["factual_lookup", "criminal_network", "trend_analysis", "risk_profile", "narrative_rag", "case_similarity"]
             if result.get("engine") not in valid_engines:
                 result["engine"] = "factual_lookup"
             return result

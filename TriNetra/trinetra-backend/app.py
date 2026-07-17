@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -406,9 +407,14 @@ def synthesize_structural_response(user_query: str, records: list) -> str:
         return f"Query extraction complete. Isolated matches count: {len(records)} details metrics."
 
     prompt = f"""
-    You are an expert law enforcement intelligence assistant. 
-    Synthesize the raw database records into a clean, professional, conversational narrative summary (2-3 sentences max).
-    Cite CrimeNo values inline exactly if visible in data records. Do not interpolate outside historical data text bounds.
+    You are a strict, enterprise-grade law enforcement data synthesizer.
+    Your ONLY job is to take the raw JSON database rows below and convert them into a clean, professional, conversational summary (2-3 sentences max).
+    
+    CRITICAL RULES:
+    1. NEVER hallucinate or invent data. If a detail is not in the JSON array, do not mention it.
+    2. Cite CrimeNo values inline exactly as they appear in the data.
+    3. Do NOT provide an introduction like "Here is the data" or "Based on the records". Just state the facts directly.
+    4. If the data array is empty, simply state that no records match the criteria.
 
     INVESTIGATOR QUERY: {user_query}
     EXTRACTED DATA: {json.dumps(records[:15], default=str)}
@@ -416,7 +422,8 @@ def synthesize_structural_response(user_query: str, records: list) -> str:
     response = groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
         model="llama-3.3-70b-versatile",
-        temperature=0.3
+        temperature=0.0,
+        seed=42
     )
     return response.choices[0].message.content.strip()
 
@@ -449,9 +456,13 @@ async def handle_chat(request: ChatRequest):
         graph_payload = None  # ADD THIS LINE
         analytics_payload = None
 
-        if target_engine in ["factual_lookup"]:
+        if target_engine in ["factual_lookup", "trend_analysis"]:
+            trend_instruction = ""
+            if target_engine == "trend_analysis":
+                trend_instruction = " FORCE TREND FORMAT: Group by month. Select exactly two columns: 'month' (e.g. TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM')) and 'count'."
+                
             # Inject the security filter into the SQL generation
-            generated_sql = nl2sql_engine.generate_sql(standalone_q, rbac_filter=rbac_sql_filter)
+            generated_sql = nl2sql_engine.generate_sql(standalone_q + trend_instruction, rbac_filter=rbac_sql_filter)
             resolved_query_log = generated_sql
             execution_result = nl2sql_engine.validate_and_execute(generated_sql, standalone_q)
             
@@ -460,10 +471,23 @@ async def handle_chat(request: ChatRequest):
             else:
                 rows_payload = execution_result.get("rows", [])
                 row_count_log = len(rows_payload)
-                answer_text = synthesize_structural_response(standalone_q, rows_payload)
-                extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
-                citations_array = [str(c) for c in extracted_citations if c][:5]
-                execution_detail = f"RBAC applied ({request.role}). Executed Query."
+                
+                if target_engine == "trend_analysis":
+                    trend_data = []
+                    for row in rows_payload:
+                        keys = list(row.keys())
+                        if len(keys) >= 2:
+                            trend_data.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
+                    
+                    data_points = len(trend_data)
+                    answer_text = f"I have generated a custom trend visualization spanning {data_points} data points based on your specific criteria."
+                    execution_detail = "Executed temporal NLP-to-SQL aggregation query."
+                    analytics_payload = {"type": "trend", "data": trend_data}
+                else:
+                    answer_text = synthesize_structural_response(standalone_q, rows_payload)
+                    extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
+                    citations_array = [str(c) for c in extracted_citations if c][:5]
+                    execution_detail = f"RBAC applied ({request.role}). Executed Query."
 
         elif target_engine == "narrative_rag":
             # For Milestone 2/3, we pass standard RAG. 
@@ -474,18 +498,6 @@ async def handle_chat(request: ChatRequest):
                 answer_text = rag_result["answer"]
                 citations_array = rag_result["citations"]
                 row_count_log = len(citations_array)
-
-        elif target_engine == "trend_analysis":
-            trend_result = analytics_engine.get_crime_trend()
-            if "error" in trend_result:
-                answer_text = f"Trend generation failed: {trend_result['error']}"
-            else:
-                data_points = len(trend_result["trend_data"])
-                answer_text = f"I have generated the crime trend visualization spanning {data_points} months."
-                execution_detail = "Executed temporal aggregation query for trend charting."
-                
-                # ADD THIS LINE:
-                analytics_payload = {"type": "trend", "data": trend_result["trend_data"]}
                 
         elif target_engine == "risk_profile":
             accused_id = router_engine.extract_accused_id(standalone_q)
@@ -534,6 +546,34 @@ async def handle_chat(request: ChatRequest):
                     execution_detail = f"Executed 2-hop Louvain network map. Displaying {node_count} nodes."
 
                     graph_payload = graph_result  # ADD THIS LINE
+
+        elif target_engine == "case_similarity":
+            # 1. Extract the CaseMasterID from the query. Let's reuse extract_accused_id logic or regex it.
+            match = re.search(r'\d+', standalone_q)
+            target_case_id = int(match.group()) if match else 0
+            
+            if target_case_id == 0:
+                answer_text = "I need a specific Case ID to find similarities. For example: 'Find cases similar to CaseMasterID 2817'."
+                execution_detail = "Failed to extract integer Case ID from prompt."
+            else:
+                from engines.pattern_engine import pattern_engine
+                similarity_result = pattern_engine.find_similar_cases(target_case_id)
+                if "error" in similarity_result:
+                    answer_text = f"Similarity engine failed: {similarity_result['error']}"
+                else:
+                    matches = similarity_result.get("similar_cases", [])
+                    row_count_log = len(matches)
+                    if not matches:
+                        answer_text = f"No similar cases found for CaseMasterID {target_case_id}."
+                    else:
+                        answer_text = f"I found {len(matches)} highly similar cases based on narrative semantics, Modus Operandi overlaps, and spatial-temporal proximity. The strongest matches are:\n\n"
+                        for m in matches[:3]:
+                            answer_text += f"- **Crime No {m.get('crime_no', 'Unknown')}**: {int(m.get('match_score', 0))}% match. (Why: {', '.join(m.get('explanations', []))})\n"
+                        
+                        extracted_citations = [m.get("crime_no") for m in matches if m.get("crime_no")]
+                        citations_array = [str(c) for c in extracted_citations][:5]
+                        
+                    execution_detail = f"Executed Tri-Signal pgvector similarity search for Case ID {target_case_id}."
 
         else:
             answer_text = "Routed to Analytics endpoint (Milestone 4)."

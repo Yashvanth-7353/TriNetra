@@ -70,7 +70,8 @@ class RAGEngine:
             chat_completion = self.groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model="llama-3.3-70b-versatile",
-                temperature=0.2,
+                temperature=0.0,
+                seed=42
             )
             
             return {
