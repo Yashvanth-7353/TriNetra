@@ -64,7 +64,7 @@ function SkeletonRow() {
 //  MAIN COMPONENT
 // ═══════════════════════════════════════════════
 export default function CaseExplorer() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const urlSearch = searchParams.get('search');
 
   // ─── Filter State ───
@@ -139,8 +139,12 @@ export default function CaseExplorer() {
     if (urlSearch) {
       setSearchTerm(urlSearch);
       doSearch(1, urlSearch);
+      
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('search');
+      setSearchParams(newParams, { replace: true });
     }
-  }, [urlSearch, doSearch]);
+  }, [urlSearch, doSearch, searchParams, setSearchParams]);
 
   // ─── Open Detail Drawer ───
   const openDetail = async (caseId: number) => {
