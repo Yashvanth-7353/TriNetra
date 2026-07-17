@@ -12,7 +12,7 @@ import {
   fetchAnalyticsTrendsAdvanced,
   fetchAnalyticsCategorical,
   fetchAnalyticsLifecycle,
-  fetchAnalyticsFinancial,
+  fetchAnalyticsReportingLag,
   fetchAnalyticsDemographics,
   type FilterOption
 } from '../services/api';
@@ -34,7 +34,7 @@ export default function CrimeAnalytics() {
   const [trendsData, setTrendsData] = useState<any>(null);
   const [categoricalData, setCategoricalData] = useState<any>(null);
   const [lifecycleData, setLifecycleData] = useState<any>(null);
-  const [financialData, setFinancialData] = useState<any>(null);
+  const [lagData, setLagData] = useState<any>(null);
   const [demographicsData, setDemographicsData] = useState<any>(null);
 
   const [isLoading, setIsLoading] = useState(true);
@@ -69,11 +69,11 @@ export default function CrimeAnalytics() {
         sumRes, geoRes, trendRes, catRes, lifeRes, finRes, demRes
       ] = await Promise.all([
         fetchAnalyticsSummary(params).catch(() => null),
-        fetchAnalyticsGeographic(selectedTimeWindow).catch(() => null),
+        fetchAnalyticsGeographic(params).catch(() => null),
         fetchAnalyticsTrendsAdvanced(params).catch(() => null),
         fetchAnalyticsCategorical(params).catch(() => null),
         fetchAnalyticsLifecycle(params).catch(() => null),
-        fetchAnalyticsFinancial(params).catch(() => null),
+        fetchAnalyticsReportingLag(params).catch(() => null),
         fetchAnalyticsDemographics(params).catch(() => null)
       ]);
 
@@ -82,7 +82,7 @@ export default function CrimeAnalytics() {
       if (trendRes) setTrendsData(trendRes);
       if (catRes) setCategoricalData(catRes);
       if (lifeRes) setLifecycleData(lifeRes);
-      if (finRes) setFinancialData(finRes);
+      if (finRes) setLagData(finRes);
       if (demRes) setDemographicsData(demRes);
 
     } catch (err: any) {
@@ -212,12 +212,21 @@ export default function CrimeAnalytics() {
                 <CircleMarker
                   key={i}
                   center={[pt.lat, pt.lng]}
-                  radius={Math.min(20, pt.count * 1.5)}
+                  radius={6}
                   fillColor={pt.trend === 'up' ? '#e11d48' : '#ca8a04'}
-                  fillOpacity={0.4}
-                  stroke={false}
+                  fillOpacity={0.6}
+                  stroke={true}
+                  color="#ffffff"
+                  weight={1}
                 >
-                  <Popup>Density: {pt.count} cases</Popup>
+                  <Popup>
+                    <div className="text-xs">
+                      <div className="font-bold text-slate-800">{pt.crime_no}</div>
+                      <div className="text-slate-600 mt-1 max-w-[200px] whitespace-normal line-clamp-3">
+                        {pt.brief_facts}
+                      </div>
+                    </div>
+                  </Popup>
                 </CircleMarker>
               ))}
             </MapContainer>
@@ -269,25 +278,25 @@ export default function CrimeAnalytics() {
           </div>
         </div>
 
-        {/* Anomaly Callout */}
+        {/* Monthly Volume Trend */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-          <h2 className="text-lg font-bold text-slate-800 mb-4 text-rose-600 flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5" /> Digital Arrest Scam Anomaly (Cybercrime)
+          <h2 className="text-lg font-bold text-slate-800 mb-4 text-blue-600 flex items-center gap-2">
+            <TrendingUp className="w-5 h-5" /> Statewide Monthly Registration Trend
           </h2>
           <div className="h-[300px]">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={trendsData?.anomaly || []}>
+              <AreaChart data={trendsData?.monthly_trend || []}>
                 <defs>
                   <linearGradient id="colorAna" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#e11d48" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#e11d48" stopOpacity={0}/>
+                    <stop offset="5%" stopColor="#2563eb" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#2563eb" stopOpacity={0}/>
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="month" tick={{fontSize: 12}} />
                 <YAxis tick={{fontSize: 12}} />
                 <RechartsTooltip />
-                <Area type="monotone" dataKey="count" stroke="#e11d48" fillOpacity={1} fill="url(#colorAna)" />
+                <Area type="monotone" dataKey="count" stroke="#2563eb" fillOpacity={1} fill="url(#colorAna)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -360,26 +369,20 @@ export default function CrimeAnalytics() {
           </div>
         </div>
 
-        {/* Financial Crimes */}
+        {/* Reporting Lag */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
           <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
-            <DollarSign className="w-5 h-5 text-green-600" /> Flagged Txn Volume
+            <Clock className="w-5 h-5 text-amber-600" /> FIR Reporting Lag (Incident to Reg)
           </h2>
           <div className="h-[250px]">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={financialData?.transactions || []}>
-                <defs>
-                  <linearGradient id="colorFin" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#16a34a" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#16a34a" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
+              <BarChart data={lagData?.lag || []}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="month" tick={{fontSize: 12}} />
-                <YAxis tick={{fontSize: 12}} />
+                <XAxis dataKey="bucket" tick={{fontSize: 11}} />
+                <YAxis />
                 <RechartsTooltip />
-                <Area type="monotone" dataKey="amount" stroke="#16a34a" fillOpacity={1} fill="url(#colorFin)" />
-              </AreaChart>
+                <Bar dataKey="count" fill="#d97706" radius={[4,4,0,0]} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </div>

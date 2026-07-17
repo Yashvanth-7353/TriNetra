@@ -221,10 +221,14 @@ async def get_analytics_alerts(
 
 @app.get("/api/analytics/geographic")
 async def get_analytics_geographic(
-    time_window: Optional[str] = Query(None)
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None),
+    category_id: Optional[int] = Query(None)
 ):
     """Returns grid hotspots and district rankings."""
-    result = analytics_engine.get_analytics_geographic(time_window=time_window)
+    result = analytics_engine.get_analytics_geographic(
+        district_id=district_id, time_window=time_window, category_id=category_id
+    )
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
     return {"status": "success", **result}
@@ -272,14 +276,15 @@ async def get_analytics_lifecycle(
     return {"status": "success", **result}
 
 
-@app.get("/api/analytics/financial")
-async def get_analytics_financial(
+@app.get("/api/analytics/reporting-lag")
+async def get_analytics_reporting_lag(
     district_id: Optional[int] = Query(None),
-    time_window: Optional[str] = Query(None)
+    time_window: Optional[str] = Query(None),
+    category_id: Optional[int] = Query(None)
 ):
-    """Returns flagged transaction volumes and suspect account metrics."""
-    result = analytics_engine.get_analytics_financial(
-        district_id=district_id, time_window=time_window
+    """Returns FIR reporting lag distribution."""
+    result = analytics_engine.get_analytics_reporting_lag(
+        district_id=district_id, time_window=time_window, category_id=category_id
     )
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])

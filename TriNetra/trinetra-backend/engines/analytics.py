@@ -555,30 +555,39 @@ class AnalyticsEngine:
         except Exception as e:
             return {"error": str(e)}
 
-    def get_analytics_geographic(self, time_window=None) -> dict:
+    def get_analytics_geographic(self, district_id=None, time_window=None, category_id=None) -> dict:
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
             
-            tw_param = time_window if time_window else "12m"
+            conditions, params = self._build_filters(district_id, time_window, category_id)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
             
-            # Hotspot Grid
-            cur.execute("""
-                SELECT GridLat, GridLng, CrimeCount, TrendDirection
-                FROM CrimeHotspotCell
-                WHERE TimeWindow = %s
-            """, (tw_param,))
+            # Hotspot Grid (Strict real coordinates only)
+            cur.execute(f"""
+                SELECT 
+                    cm.latitude as lat, 
+                    cm.longitude as lng, 
+                    cm.CrimeNo, 
+                    COALESCE(cm.BriefFacts, cc.LookupValue) as detail
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN CaseCategory cc ON cm.CaseCategoryID = cc.CaseCategoryID
+                WHERE {where_clause} AND cm.latitude IS NOT NULL AND cm.longitude IS NOT NULL
+                LIMIT 150
+            """, params)
+            
             grid_rows = cur.fetchall()
-            grid_data = [{"lat": float(r[0]), "lng": float(r[1]), "count": r[2], "trend": r[3]} for r in grid_rows]
+            grid_data = [{"lat": float(r[0]), "lng": float(r[1]), "crime_no": r[2], "brief_facts": r[3], "count": 1, "trend": "stable"} for r in grid_rows]
             
             # District Ranking with MoM Sparkline
-            cur.execute("""
+            cur.execute(f"""
                 WITH district_cases AS (
                     SELECT u.DistrictID, d.DistrictName, COUNT(*) as total_cases
                     FROM CaseMaster cm
                     JOIN Unit u ON cm.PoliceStationID = u.UnitID
                     JOIN District d ON u.DistrictID = d.DistrictID
-                    WHERE cm.CrimeRegisteredDate >= NOW() - INTERVAL '12 months'
+                    WHERE {where_clause}
                     GROUP BY u.DistrictID, d.DistrictName
                 ),
                 monthly_cases AS (
@@ -633,22 +642,22 @@ class AnalyticsEngine:
             yoy_rows = cur.fetchall()
             yoy_data = [{"year": int(r[0]), "category": r[1], "count": r[2]} for r in yoy_rows]
             
-            # Anomaly Callout (Digital-arrest-scam / Cybercrime)
-            cur.execute("""
+            # Overall Monthly Trend (Replacing Anomaly)
+            cur.execute(f"""
                 SELECT TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') as month, COUNT(*) as c
                 FROM CaseMaster cm
-                JOIN CaseCategory cc ON cm.CaseCategoryID = cc.CaseCategoryID
-                WHERE cc.LookupValue ILIKE '%Cyber%' OR cm.BriefFacts ILIKE '%digital arrest%' OR cm.BriefFacts ILIKE '%scam%'
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE {where_clause}
                 GROUP BY month
                 ORDER BY month ASC
                 LIMIT 12
-            """)
-            anomaly_rows = cur.fetchall()
-            anomaly_data = [{"month": r[0], "count": r[1]} for r in anomaly_rows]
+            """, params)
+            trend_rows = cur.fetchall()
+            monthly_trend = [{"month": r[0], "count": r[1]} for r in trend_rows]
             
             cur.close()
             conn.close()
-            return {"yoy": yoy_data, "anomaly": anomaly_data}
+            return {"yoy": yoy_data, "monthly_trend": monthly_trend}
         except Exception as e:
             return {"error": str(e)}
 
@@ -737,41 +746,36 @@ class AnalyticsEngine:
         except Exception as e:
             return {"error": str(e)}
 
-    def get_analytics_financial(self, district_id=None, time_window=None) -> dict:
+    def get_analytics_reporting_lag(self, district_id=None, time_window=None, category_id=None) -> dict:
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
-            conditions, params = self._build_filters(district_id, time_window, None)
+            conditions, params = self._build_filters(district_id, time_window, category_id)
             where_clause = " AND ".join(conditions) if conditions else "1=1"
             
             cur.execute(f"""
-                SELECT TO_CHAR(ft.TxnDate, 'YYYY-MM') as month, SUM(ft.Amount) as total_amt, COUNT(*) as txn_count
-                FROM FinancialTransaction ft
-                JOIN CaseMaster cm ON ft.CaseMasterID = cm.CaseMasterID
+                SELECT
+                  CASE 
+                    WHEN EXTRACT(DAY FROM (cm.CrimeRegisteredDate - cm.IncidentFromDate)) <= 1 THEN '0-24 Hours'
+                    WHEN EXTRACT(DAY FROM (cm.CrimeRegisteredDate - cm.IncidentFromDate)) <= 7 THEN '1-7 Days'
+                    WHEN EXTRACT(DAY FROM (cm.CrimeRegisteredDate - cm.IncidentFromDate)) <= 30 THEN '8-30 Days'
+                    ELSE '30+ Days'
+                  END as lag_bucket,
+                  COUNT(*) as c
+                FROM CaseMaster cm
                 JOIN Unit u ON cm.PoliceStationID = u.UnitID
-                WHERE {where_clause} 
-                GROUP BY month
-                ORDER BY month ASC
-                LIMIT 12
+                WHERE cm.IncidentFromDate IS NOT NULL AND cm.CrimeRegisteredDate IS NOT NULL AND cm.CrimeRegisteredDate >= cm.IncidentFromDate AND {where_clause}
+                GROUP BY lag_bucket
             """, params)
-            txn_data = [{"month": r[0], "amount": float(r[1]), "count": r[2]} for r in cur.fetchall()]
+            lag_data = [{"bucket": r[0], "count": r[1]} for r in cur.fetchall()]
             
-            cur.execute(f"""
-                SELECT sa.BankName, COUNT(DISTINCT sa.AccountID) as accounts
-                FROM SuspectAccount sa
-                JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
-                JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
-                JOIN Unit u ON cm.PoliceStationID = u.UnitID
-                WHERE {where_clause} AND sa.BankName IS NOT NULL
-                GROUP BY sa.BankName
-                ORDER BY accounts DESC
-                LIMIT 5
-            """, params)
-            bank_data = [{"name": r[0], "accounts": r[1]} for r in cur.fetchall()]
+            # Sort buckets logically
+            sort_order = {"0-24 Hours": 1, "1-7 Days": 2, "8-30 Days": 3, "30+ Days": 4}
+            lag_data = sorted(lag_data, key=lambda x: sort_order.get(x["bucket"], 5))
             
             cur.close()
             conn.close()
-            return {"transactions": txn_data, "banks": bank_data}
+            return {"lag": lag_data}
         except Exception as e:
             return {"error": str(e)}
 

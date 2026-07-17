@@ -606,17 +606,28 @@ export interface AnalyticsGeographicResponse {
   }[];
 }
 
-export async function fetchAnalyticsGeographic(time_window?: string): Promise<AnalyticsGeographicResponse> {
-  const qs = time_window ? `?time_window=${encodeURIComponent(time_window)}` : '';
+export async function fetchAnalyticsGeographic(params: AnalyticsSearchParams): Promise<AnalyticsGeographicResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
   const response = await fetch(`${API_BASE}/api/analytics/geographic${qs}`, { headers: authHeaders() });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
 
-export interface AnalyticsTrendsAdvancedResponse {
+export interface AnalyticsTrendsResponse {
   status: string;
-  yoy: { year: number; category: string; count: number }[];
-  anomaly: { month: string; count: number }[];
+  yoy: {
+    year: number;
+    category: string;
+    count: number;
+  }[];
+  monthly_trend: {
+    month: string;
+    count: number;
+  }[];
 }
 
 export async function fetchAnalyticsTrendsAdvanced(params: AnalyticsSearchParams): Promise<AnalyticsTrendsAdvancedResponse> {
@@ -658,6 +669,25 @@ export async function fetchAnalyticsLifecycle(params: AnalyticsSearchParams): Pr
   if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
   const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
   const response = await fetch(`${API_BASE}/api/analytics/lifecycle${qs}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export interface AnalyticsReportingLagResponse {
+  status: string;
+  lag: {
+    bucket: string;
+    count: number;
+  }[];
+}
+
+export async function fetchAnalyticsReportingLag(params: AnalyticsSearchParams): Promise<AnalyticsReportingLagResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/reporting-lag${qs}`, { headers: authHeaders() });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
