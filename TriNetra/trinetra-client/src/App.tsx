@@ -14,8 +14,8 @@ import NetworkAnalysis from './pages/NetworkAnalysis';
 import CrimeAnalytics from './pages/CrimeAnalytics';
 import OffenderProfiles from './pages/OffenderProfiles';
 import PreventionAlerts from './pages/PreventionAlerts';
-import Settings from './pages/Settings';
 import Profile from './pages/Profile';
+
 
 function App() {
   return (
@@ -33,7 +33,7 @@ function App() {
         <Route path="/analytics" element={<CrimeAnalytics />} />
         <Route path="/offenders" element={<OffenderProfiles />} />
         <Route path="/alerts" element={<PreventionAlerts />} />
-        <Route path="/settings" element={<Settings />} />
+        
         <Route path="/profile" element={<Profile />} />
         
         {/* Redirect unknown auth routes to dashboard */}

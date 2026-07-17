@@ -138,6 +138,28 @@ class AnalyticsEngine:
                     prefix = "+" if change >= 0 else ""
                     mom_change = f"{prefix}{round(change, 1)}%"
             
+            # 5. Arrest Rate
+            cur.execute(f"""
+                SELECT COUNT(DISTINCT cm.CaseMasterID)
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN ArrestSurrender a ON cm.CaseMasterID = a.CaseMasterID
+                WHERE {where_clause}
+            """, params)
+            arrest_cases = cur.fetchone()[0]
+            arrest_rate = round((arrest_cases / total_cases * 100), 1) if total_cases > 0 else 0.0
+
+            # 6. Avg Days to Chargesheet
+            cur.execute(f"""
+                SELECT AVG(EXTRACT(EPOCH FROM (cd.csdate - cm.CrimeRegisteredDate))/86400.0)
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN ChargesheetDetails cd ON cm.CaseMasterID = cd.CaseMasterID
+                WHERE {where_clause} AND cd.csdate IS NOT NULL AND cm.CrimeRegisteredDate IS NOT NULL
+            """, params)
+            avg_days_row = cur.fetchone()
+            avg_days = round(float(avg_days_row[0]), 1) if avg_days_row and avg_days_row[0] else 0.0
+            
             cur.close()
             conn.close()
             
@@ -145,7 +167,9 @@ class AnalyticsEngine:
                 "total_cases": total_cases,
                 "solved_percentage": solved_pct,
                 "highest_activity_district": highest_district,
-                "biggest_mom_change": mom_change
+                "biggest_mom_change": mom_change,
+                "arrest_rate": arrest_rate,
+                "avg_days_to_chargesheet": avg_days
             }
         except Exception as e:
             return {"error": str(e)}
@@ -528,5 +552,266 @@ class AnalyticsEngine:
             cur.close()
             conn.close()
             return {"alerts": alerts}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_geographic(self, time_window=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            
+            tw_param = time_window if time_window else "12m"
+            
+            # Hotspot Grid
+            cur.execute("""
+                SELECT GridLat, GridLng, CrimeCount, TrendDirection
+                FROM CrimeHotspotCell
+                WHERE TimeWindow = %s
+            """, (tw_param,))
+            grid_rows = cur.fetchall()
+            grid_data = [{"lat": float(r[0]), "lng": float(r[1]), "count": r[2], "trend": r[3]} for r in grid_rows]
+            
+            # District Ranking with MoM Sparkline
+            cur.execute("""
+                WITH district_cases AS (
+                    SELECT u.DistrictID, d.DistrictName, COUNT(*) as total_cases
+                    FROM CaseMaster cm
+                    JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                    JOIN District d ON u.DistrictID = d.DistrictID
+                    WHERE cm.CrimeRegisteredDate >= NOW() - INTERVAL '12 months'
+                    GROUP BY u.DistrictID, d.DistrictName
+                ),
+                monthly_cases AS (
+                    SELECT u.DistrictID, TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') as month, COUNT(*) as m_count
+                    FROM CaseMaster cm
+                    JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                    WHERE cm.CrimeRegisteredDate >= NOW() - INTERVAL '6 months'
+                    GROUP BY u.DistrictID, month
+                )
+                SELECT dc.DistrictID, dc.DistrictName, dc.total_cases, mc.month, mc.m_count
+                FROM district_cases dc
+                LEFT JOIN monthly_cases mc ON dc.DistrictID = mc.DistrictID
+                ORDER BY dc.total_cases DESC, mc.month ASC
+            """)
+            rank_rows = cur.fetchall()
+            
+            district_map = {}
+            for r in rank_rows:
+                did, dname, tot, m, mcnt = r[0], r[1], r[2], r[3], r[4]
+                if did not in district_map:
+                    district_map[did] = {"id": did, "name": dname, "total": tot, "sparkline": []}
+                if m:
+                    district_map[did]["sparkline"].append({"month": m, "count": mcnt})
+            
+            rankings = list(district_map.values())
+            
+            cur.close()
+            conn.close()
+            return {"grid": grid_data, "rankings": rankings}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_trends_advanced(self, district_id=None, category_id=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            
+            conditions, params = self._build_filters(district_id, None, category_id)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            # YoY Comparison (Grouped by Year and Category)
+            cur.execute(f"""
+                SELECT EXTRACT(YEAR FROM cm.CrimeRegisteredDate) as yr, cc.LookupValue as category, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN CaseCategory cc ON cm.CaseCategoryID = cc.CaseCategoryID
+                WHERE {where_clause} AND cm.CrimeRegisteredDate IS NOT NULL 
+                  AND EXTRACT(YEAR FROM cm.CrimeRegisteredDate) IN (2024, 2025, 2026)
+                GROUP BY yr, category
+                ORDER BY yr ASC
+            """, params)
+            yoy_rows = cur.fetchall()
+            yoy_data = [{"year": int(r[0]), "category": r[1], "count": r[2]} for r in yoy_rows]
+            
+            # Anomaly Callout (Digital-arrest-scam / Cybercrime)
+            cur.execute("""
+                SELECT TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') as month, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN CaseCategory cc ON cm.CaseCategoryID = cc.CaseCategoryID
+                WHERE cc.LookupValue ILIKE '%Cyber%' OR cm.BriefFacts ILIKE '%digital arrest%' OR cm.BriefFacts ILIKE '%scam%'
+                GROUP BY month
+                ORDER BY month ASC
+                LIMIT 12
+            """)
+            anomaly_rows = cur.fetchall()
+            anomaly_data = [{"month": r[0], "count": r[1]} for r in anomaly_rows]
+            
+            cur.close()
+            conn.close()
+            return {"yoy": yoy_data, "anomaly": anomaly_data}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_categorical(self, district_id=None, time_window=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            conditions, params = self._build_filters(district_id, time_window, None)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            # Crime Head (Donut)
+            cur.execute(f"""
+                SELECT ch.CrimeGroupName, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN CrimeHead ch ON cm.CrimeMajorHeadID = ch.CrimeHeadID
+                WHERE {where_clause}
+                GROUP BY ch.CrimeGroupName
+                ORDER BY c DESC
+            """, params)
+            head_data = [{"name": r[0], "value": r[1]} for r in cur.fetchall()]
+            
+            # Gravity Split
+            cur.execute(f"""
+                SELECT g.LookupValue, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN GravityOffence g ON cm.GravityOffenceID = g.GravityOffenceID
+                WHERE {where_clause}
+                GROUP BY g.LookupValue
+            """, params)
+            gravity_data = [{"name": r[0], "value": r[1]} for r in cur.fetchall()]
+            
+            # Top MO Tags
+            cur.execute(f"""
+                SELECT tm.MOTagName, COUNT(*) as c
+                FROM ModusOperandi mo
+                JOIN CaseMaster cm ON mo.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN MOTagMaster tm ON mo.MOTagID = tm.MOTagID
+                WHERE {where_clause}
+                GROUP BY tm.MOTagName
+                ORDER BY c DESC
+                LIMIT 10
+            """, params)
+            mo_data = [{"name": r[0], "count": r[1]} for r in cur.fetchall()]
+            
+            cur.close()
+            conn.close()
+            return {"heads": head_data, "gravity": gravity_data, "mo_tags": mo_data}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_lifecycle(self, district_id=None, time_window=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            conditions, params = self._build_filters(district_id, time_window, None)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            # Status Funnel
+            cur.execute(f"""
+                SELECT cs.CaseStatusName, COUNT(*) as c
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN CaseStatusMaster cs ON cm.CaseStatusID = cs.CaseStatusID
+                WHERE {where_clause}
+                GROUP BY cs.CaseStatusName
+            """, params)
+            funnel_data = [{"name": r[0], "value": r[1]} for r in cur.fetchall()]
+            
+            # Chargesheet Outcomes
+            cur.execute(f"""
+                SELECT cd.cstype, COUNT(*) as c
+                FROM ChargesheetDetails cd
+                JOIN CaseMaster cm ON cd.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE {where_clause} AND cd.cstype IS NOT NULL
+                GROUP BY cd.cstype
+            """, params)
+            cs_data = [{"name": f"Type {r[0]}", "value": r[1]} for r in cur.fetchall()]
+            
+            cur.close()
+            conn.close()
+            return {"funnel": funnel_data, "chargesheets": cs_data}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_financial(self, district_id=None, time_window=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            conditions, params = self._build_filters(district_id, time_window, None)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            cur.execute(f"""
+                SELECT TO_CHAR(ft.TxnDate, 'YYYY-MM') as month, SUM(ft.Amount) as total_amt, COUNT(*) as txn_count
+                FROM FinancialTransaction ft
+                JOIN CaseMaster cm ON ft.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE {where_clause} 
+                GROUP BY month
+                ORDER BY month ASC
+                LIMIT 12
+            """, params)
+            txn_data = [{"month": r[0], "amount": float(r[1]), "count": r[2]} for r in cur.fetchall()]
+            
+            cur.execute(f"""
+                SELECT sa.BankName, COUNT(DISTINCT sa.AccountID) as accounts
+                FROM SuspectAccount sa
+                JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
+                JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE {where_clause} AND sa.BankName IS NOT NULL
+                GROUP BY sa.BankName
+                ORDER BY accounts DESC
+                LIMIT 5
+            """, params)
+            bank_data = [{"name": r[0], "accounts": r[1]} for r in cur.fetchall()]
+            
+            cur.close()
+            conn.close()
+            return {"transactions": txn_data, "banks": bank_data}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_analytics_demographics(self, district_id=None, time_window=None) -> dict:
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            conditions, params = self._build_filters(district_id, time_window, None)
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            # Victims: Age Band & Gender
+            cur.execute(f"""
+                SELECT 
+                    CASE 
+                        WHEN v.AgeYear < 18 THEN '<18'
+                        WHEN v.AgeYear BETWEEN 18 AND 30 THEN '18-30'
+                        WHEN v.AgeYear BETWEEN 31 AND 50 THEN '31-50'
+                        ELSE '50+' 
+                    END as age_band,
+                    v.GenderID,
+                    COUNT(*) as c
+                FROM Victim v
+                JOIN CaseMaster cm ON v.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE {where_clause} AND v.AgeYear IS NOT NULL
+                GROUP BY age_band, v.GenderID
+            """, params)
+            victim_rows = cur.fetchall()
+            
+            # Apply n>=10 threshold logic
+            victim_data = []
+            for r in victim_rows:
+                gender = "Male" if r[1] == 1 else "Female" if r[1] == 2 else "Other"
+                count = r[2]
+                if count < 10:
+                    gender = "Redacted (n<10)"
+                victim_data.append({"age_band": r[0], "gender": gender, "count": count})
+                
+            cur.close()
+            conn.close()
+            return {"victims": victim_data}
         except Exception as e:
             return {"error": str(e)}

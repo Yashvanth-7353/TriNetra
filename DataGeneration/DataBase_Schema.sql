@@ -151,6 +151,11 @@ CREATE TABLE Employee (
     AppointmentDate     DATE
 );
 
+CREATE TABLE IF NOT EXISTS EmployeeCredentials (
+    employeeid INT PRIMARY KEY REFERENCES Employee(employeeid),
+    password_hash VARCHAR(255) NOT NULL
+);
+
 -- ============================================================================
 -- PART C — CORE FIR TABLES
 -- ============================================================================

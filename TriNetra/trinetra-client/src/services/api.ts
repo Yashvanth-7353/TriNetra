@@ -519,6 +519,8 @@ export interface AnalyticsSummaryResponse {
   solved_percentage: number;
   highest_activity_district: string;
   biggest_mom_change: string;
+  arrest_rate: number;
+  avg_days_to_chargesheet: number;
 }
 
 export interface HotspotPoint {
@@ -588,6 +590,106 @@ export async function fetchAnalyticsTrends(params: AnalyticsSearchParams): Promi
     const err = await response.json().catch(() => ({ detail: 'Failed to load trends' }));
     throw new Error(err.detail || `HTTP ${response.status}`);
   }
+  return response.json();
+}
+
+// --- New Full Suite Endpoints ---
+
+export interface AnalyticsGeographicResponse {
+  status: string;
+  grid: { lat: number; lng: number; count: number; trend: string }[];
+  rankings: {
+    id: number;
+    name: string;
+    total: number;
+    sparkline: { month: string; count: number }[];
+  }[];
+}
+
+export async function fetchAnalyticsGeographic(time_window?: string): Promise<AnalyticsGeographicResponse> {
+  const qs = time_window ? `?time_window=${encodeURIComponent(time_window)}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/geographic${qs}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export interface AnalyticsTrendsAdvancedResponse {
+  status: string;
+  yoy: { year: number; category: string; count: number }[];
+  anomaly: { month: string; count: number }[];
+}
+
+export async function fetchAnalyticsTrendsAdvanced(params: AnalyticsSearchParams): Promise<AnalyticsTrendsAdvancedResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/trends-advanced${qs}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export interface AnalyticsCategoricalResponse {
+  status: string;
+  heads: { name: string; value: number }[];
+  gravity: { name: string; value: number }[];
+  mo_tags: { name: string; count: number }[];
+}
+
+export async function fetchAnalyticsCategorical(params: AnalyticsSearchParams): Promise<AnalyticsCategoricalResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/categorical${qs}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export interface AnalyticsLifecycleResponse {
+  status: string;
+  funnel: { name: string; value: number }[];
+  chargesheets: { name: string; value: number }[];
+}
+
+export async function fetchAnalyticsLifecycle(params: AnalyticsSearchParams): Promise<AnalyticsLifecycleResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/lifecycle${qs}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export interface AnalyticsFinancialResponse {
+  status: string;
+  transactions: { month: string; amount: number; count: number }[];
+  banks: { name: string; accounts: number }[];
+}
+
+export async function fetchAnalyticsFinancial(params: AnalyticsSearchParams): Promise<AnalyticsFinancialResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/financial${qs}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export interface AnalyticsDemographicsResponse {
+  status: string;
+  victims: { age_band: string; gender: string; count: number }[];
+}
+
+export async function fetchAnalyticsDemographics(params: AnalyticsSearchParams): Promise<AnalyticsDemographicsResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const response = await fetch(`${API_BASE}/api/analytics/demographics${qs}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
 

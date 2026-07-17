@@ -219,6 +219,87 @@ async def get_analytics_alerts(
     return {"status": "success", **result}
 
 
+@app.get("/api/analytics/geographic")
+async def get_analytics_geographic(
+    time_window: Optional[str] = Query(None)
+):
+    """Returns grid hotspots and district rankings."""
+    result = analytics_engine.get_analytics_geographic(time_window=time_window)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/analytics/trends-advanced")
+async def get_analytics_trends_advanced(
+    district_id: Optional[int] = Query(None),
+    category_id: Optional[int] = Query(None)
+):
+    """Returns YoY category comparisons and anomaly callout trends."""
+    result = analytics_engine.get_analytics_trends_advanced(
+        district_id=district_id, category_id=category_id
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/analytics/categorical")
+async def get_analytics_categorical(
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None)
+):
+    """Returns crime head distributions, gravity splits, and top MO tags."""
+    result = analytics_engine.get_analytics_categorical(
+        district_id=district_id, time_window=time_window
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/analytics/lifecycle")
+async def get_analytics_lifecycle(
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None)
+):
+    """Returns status funnel and chargesheet outcomes."""
+    result = analytics_engine.get_analytics_lifecycle(
+        district_id=district_id, time_window=time_window
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/analytics/financial")
+async def get_analytics_financial(
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None)
+):
+    """Returns flagged transaction volumes and suspect account metrics."""
+    result = analytics_engine.get_analytics_financial(
+        district_id=district_id, time_window=time_window
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
+@app.get("/api/analytics/demographics")
+async def get_analytics_demographics(
+    district_id: Optional[int] = Query(None),
+    time_window: Optional[str] = Query(None)
+):
+    """Returns victim/complainant socio-demographics enforcing n>=10 privacy threshold."""
+    result = analytics_engine.get_analytics_demographics(
+        district_id=district_id, time_window=time_window
+    )
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return {"status": "success", **result}
+
+
 
 # ──────────────────────────────────────────────
 #  Network Analysis REST Endpoints
