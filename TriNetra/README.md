@@ -26,7 +26,11 @@
    - Secure login mechanism with JWT-based sessions.
    - Role-Based Access Control (RBAC) ensures investigators only see data within their authorized jurisdictions and clearance levels.
 
-6. **Premium Session Export**
+6. **Pattern Analytics (`engines/pattern_engine.py`)**
+   - Automatically detects emerging clusters of crimes based on Modus Operandi surges.
+   - Case Similarity Engine using `pgvector` Cosine Similarity and Spatio-Temporal multidimensional matching for Explainable AI predictions.
+
+7. **Premium Session Export**
    - Generate beautifully styled HTML reports of your investigative sessions for official documentation and sharing.
 
 ---
@@ -47,7 +51,7 @@ TriNetra follows a modern client-server architecture decoupled via REST APIs.
 ### Backend (`trinetra-backend/`)
 - **Core:** Python 3, FastAPI (High-performance asynchronous API framework)
 - **AI/LLM:** Groq API (`groq`), Google Generative AI (`google-genai`) for fast intent detection and RAG.
-- **Database Connectivity:** PostgreSQL (`psycopg2-binary`)
+- **Database Connectivity:** PostgreSQL (`psycopg2-binary`) with `pgvector` for semantic similarity.
 - **Network Computation:** `NetworkX` for graph algorithms
 - **Security:** `bcrypt` for password hashing, PyJWT (custom) for token-based auth.
 
@@ -65,6 +69,7 @@ TriNetra/
 │   │   ├── rag.py                # Retrieval-Augmented Generation
 │   │   ├── network_engine.py     # Network analysis engine
 │   │   ├── analytics.py          # Data analytics & trend generation
+│   │   ├── pattern_engine.py     # Automated pattern clustering & pgvector similarity
 │   │   ├── case_explorer.py      # Case exploration & filtering logic
 │   │   ├── auth.py               # Authentication & JWT issuance
 │   │   ├── database.py           # Database connection & pooling
@@ -74,7 +79,7 @@ TriNetra/
 │
 └── trinetra-client/              # React + Vite Frontend Application
     ├── src/
-    │   ├── pages/                # UI Views (CaseExplorer, NetworkAnalysis, LoginPage, etc.)
+    │   ├── pages/                # UI Views (CaseExplorer, PatternAnalytics, NetworkAnalysis, etc.)
     │   ├── App.tsx               # Main React Application
     │   └── index.css             # Tailwind & Global Styles
     ├── package.json              # NPM dependencies & scripts
