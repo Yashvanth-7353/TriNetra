@@ -630,7 +630,7 @@ export interface AnalyticsTrendsResponse {
   }[];
 }
 
-export async function fetchAnalyticsTrendsAdvanced(params: AnalyticsSearchParams): Promise<AnalyticsTrendsAdvancedResponse> {
+export async function fetchAnalyticsTrendsAdvanced(params: AnalyticsSearchParams): Promise<AnalyticsTrendsResponse> {
   const queryParts: string[] = [];
   if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
   if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
@@ -869,5 +869,54 @@ export async function fetchSimilarCases(caseId: number, k: number = 10): Promise
     headers: authHeaders(),
   });
   if (!response.ok) throw new Error('Failed to load similar cases');
+  return response.json();
+}
+
+export async function transcribeAudio(audioBlob: Blob, languageCode: string = 'kn-IN'): Promise<{ transcript: string }> {
+  const formData = new FormData();
+  formData.append('file', audioBlob, 'speech.wav');
+  formData.append('language_code', languageCode);
+
+  const token = getStoredToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${API_BASE}/api/sarvam/stt`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'STT failed' }));
+    const errorMsg = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail || 'STT transcription failed');
+    throw new Error(errorMsg);
+  }
+
+  return response.json();
+}
+
+export async function translateText(text: string, sourceLang: string = 'kn-IN', targetLang: string = 'en-IN'): Promise<{ translated_text: string }> {
+  const response = await fetch(`${API_BASE}/api/sarvam/translate`, {
+    method: 'POST',
+    headers: {
+      ...authHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      text,
+      source_language: sourceLang,
+      target_language: targetLang,
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Translation failed' }));
+    const errorMsg = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail || 'Translation failed');
+    throw new Error(errorMsg);
+  }
+
   return response.json();
 }

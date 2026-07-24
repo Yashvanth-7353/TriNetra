@@ -2,7 +2,7 @@ import os
 import time
 import json
 import re
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -26,6 +26,7 @@ pattern_engine = PatternEngine()
 case_explorer_engine = CaseExplorerEngine()
 from engines.network_engine import NetworkEngine
 network_engine = NetworkEngine()
+from engines.sarvam_engine import sarvam_engine
 from engines.auth import authenticate_employee, create_jwt_token, verify_jwt_token, get_employee_profile
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
@@ -813,4 +814,44 @@ async def export_chat(request: ExportRequest, authorization: Optional[str] = Hea
         return Response(content=html_content, media_type="text/html", headers={"Content-Disposition": "attachment; filename=trinetra_chat_export.html"})
 
     except Exception as server_error:
-        raise HTTPException(status_code=500, detail=str(server_error))
+        raise HTTPException(status_code=500, detail=str(server_error))
+
+# ──────────────────────────────────────────────
+# Sarvam AI Endpoints (Speech-to-Text & Translation)
+# ──────────────────────────────────────────────
+
+class SarvamTranslateRequest(BaseModel):
+    text: str
+    source_language: str = "kn-IN"
+    target_language: str = "en-IN"
+
+@app.post("/api/sarvam/stt")
+async def sarvam_speech_to_text(
+    file: UploadFile = File(...),
+    language_code: str = Form("kn-IN")
+):
+    """Converts uploaded audio file to text using Sarvam AI STT."""
+    try:
+        audio_bytes = await file.read()
+        res = sarvam_engine.speech_to_text(audio_bytes=audio_bytes, language_code=language_code)
+        if "error" in res:
+            raise HTTPException(status_code=500, detail=res["error"])
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sarvam STT failed: {str(e)}")
+
+@app.post("/api/sarvam/translate")
+async def sarvam_translate(req: SarvamTranslateRequest):
+    """Translates text between Kannada and English (or other Indian languages)."""
+    try:
+        res = sarvam_engine.translate(
+            text=req.text,
+            source_lang=req.source_language,
+            target_lang=req.target_language
+        )
+        if "error" in res:
+            raise HTTPException(status_code=500, detail=res["error"])
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sarvam Translate failed: {str(e)}")
+

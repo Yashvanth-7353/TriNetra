@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, FileDown, Mic, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle } from 'lucide-react';
+import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { sendChatQuery, exportChat, type ChatResponse } from '../services/api';
+import { sendChatQuery, exportChat, transcribeAudio, translateText, type ChatResponse } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 
@@ -42,6 +42,21 @@ export default function AskTriNetra() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
 
+  // Sarvam AI Audio STT State
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
   const handleExport = async () => {
     if (messages.length === 0) return;
     setIsExporting(true);
@@ -63,13 +78,70 @@ export default function AskTriNetra() {
     }
   };
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Sarvam AI Speech-to-Text Recording Handler
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach(track => track.stop());
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        setIsTranscribing(true);
+        setStatusMessage('Sarvam AI: Transcribing audio...');
+        try {
+          const langCode = lang === 'KN' ? 'kn-IN' : 'kn-IN'; // Sarvam AI excels at Kannada speech
+          const res = await transcribeAudio(audioBlob, langCode);
+          if (res.transcript) {
+            setInputValue(res.transcript);
+            setStatusMessage('Sarvam STT: Voice transcribed successfully!');
+            setTimeout(() => setStatusMessage(null), 3500);
+          } else {
+            setStatusMessage('Sarvam STT: No speech recognized.');
+            setTimeout(() => setStatusMessage(null), 3000);
+          }
+        } catch (err: any) {
+          console.error('Sarvam STT error:', err);
+          alert('Speech-to-Text failed: ' + err.message);
+          setStatusMessage(null);
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setStatusMessage('Sarvam STT: Recording voice... Click mic to stop.');
+    } catch (err: any) {
+      console.error('Microphone error:', err);
+      alert('Microphone access denied or not supported by browser.');
+    }
   };
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const toggleRecording = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  };
+
+  const isKannadaText = (str: string) => /[\u0C80-\u0CFF]/.test(str);
 
   const handleSendMessage = async (text: string) => {
     if (!text.trim()) return;
@@ -85,12 +157,43 @@ export default function AskTriNetra() {
     setIsLoading(true);
 
     try {
-      const data: ChatResponse = await sendChatQuery(text);
+      let queryForBackend = text;
+      
+      // Check if text is in Kannada script or Kannada language mode is active
+      if (isKannadaText(text) || lang === 'KN') {
+        setStatusMessage('Sarvam AI: Translating Kannada query to English...');
+        try {
+          const tr = await translateText(text, 'kn-IN', 'en-IN');
+          if (tr.translated_text) {
+            queryForBackend = tr.translated_text;
+          }
+        } catch (trErr) {
+          console.warn('Sarvam Translation to EN failed, passing raw query:', trErr);
+        }
+      }
+
+      setStatusMessage('TriNetra Engine: Processing query...');
+      const data: ChatResponse = await sendChatQuery(queryForBackend);
+
+      let answerText = data.answer || "I'm sorry, I couldn't process that.";
+
+      // Translate response back to Kannada if user is in Kannada mode or typed in Kannada
+      if (lang === 'KN' || isKannadaText(text)) {
+        setStatusMessage('Sarvam AI: Translating response to Kannada...');
+        try {
+          const trAns = await translateText(answerText, 'en-IN', 'kn-IN');
+          if (trAns.translated_text) {
+            answerText = trAns.translated_text;
+          }
+        } catch (trAnsErr) {
+          console.warn('Sarvam Translation to KN failed:', trAnsErr);
+        }
+      }
 
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         sender: 'bot',
-        text: data.answer || "I'm sorry, I couldn't process that.",
+        text: answerText,
         intent_detected: data.intent_detected,
         citations: data.citations,
         reasoning_trace: data.reasoning_trace,
@@ -106,12 +209,13 @@ export default function AskTriNetra() {
         {
           id: (Date.now() + 1).toString(),
           sender: 'bot',
-          text: `Connection error: ${error.message || 'Could not reach TriNetra Core. Ensure the backend is running on port 9000.'}`,
+          text: `Connection error: ${error.message || 'Could not reach TriNetra Core. Ensure backend is running.'}`,
           intent_detected: 'error',
         },
       ]);
     } finally {
       setIsLoading(false);
+      setStatusMessage(null);
     }
   };
 
@@ -120,17 +224,29 @@ export default function AskTriNetra() {
       
       {/* Top Bar */}
       <div className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0 shadow-sm">
-        <h1 className="font-bold text-lg text-primary-900 flex items-center gap-2">
-          <Bot className="w-5 h-5 text-accent-500" />
-          Intelligence Copilot
-        </h1>
+        <div className="flex items-center gap-3">
+          <h1 className="font-bold text-lg text-primary-900 flex items-center gap-2">
+            <Bot className="w-5 h-5 text-accent-500" />
+            Intelligence Copilot
+          </h1>
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+            <Languages className="w-3 h-3 text-emerald-600" />
+            Sarvam AI Active
+          </span>
+        </div>
         <div className="flex items-center gap-3">
           <button 
             onClick={() => setLang(lang === 'EN' ? 'KN' : 'EN')}
-            className="flex items-center gap-1 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-md transition-colors"
+            className={cn(
+              "flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-md border transition-all shadow-sm",
+              lang === 'KN' 
+                ? "bg-primary-900 text-white border-primary-900" 
+                : "bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200"
+            )}
+            title="Toggle between English and Kannada (Sarvam AI translation)"
           >
-            <Globe className="w-4 h-4" />
-            {lang === 'EN' ? 'English' : 'ಕನ್ನಡ'}
+            <Globe className="w-3.5 h-3.5" />
+            {lang === 'EN' ? 'English Mode' : 'ಕನ್ನಡ (Sarvam AI)'}
           </button>
           <button 
             onClick={handleExport}
@@ -316,9 +432,37 @@ export default function AskTriNetra() {
 
       {/* Input Area */}
       <div className="bg-white border-t border-slate-200 p-4 shrink-0">
+        {statusMessage && (
+          <div className="max-w-4xl mx-auto mb-2 flex items-center justify-between bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg text-xs font-medium text-emerald-800 animate-fadeIn">
+            <span className="flex items-center gap-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-600" />
+              {statusMessage}
+            </span>
+            <span className="text-[10px] uppercase tracking-wider bg-emerald-200/60 px-1.5 py-0.5 rounded text-emerald-900 font-bold">Sarvam AI Engine</span>
+          </div>
+        )}
         <div className="max-w-4xl mx-auto relative flex items-end gap-2 bg-slate-50 rounded-xl border border-slate-200 p-2 shadow-sm focus-within:border-primary-400 focus-within:ring-1 focus-within:ring-primary-400 transition-all">
-          <button className="p-2.5 text-slate-400 hover:text-primary-900 transition-colors rounded-lg">
-            <Mic className="w-5 h-5" />
+          <button 
+            type="button"
+            onClick={toggleRecording}
+            disabled={isTranscribing || isLoading}
+            title={isRecording ? "Click to stop recording" : "Click to record voice query using Sarvam AI STT"}
+            className={cn(
+              "p-2.5 transition-all rounded-lg flex items-center justify-center shrink-0",
+              isRecording 
+                ? "bg-red-500 text-white shadow-md animate-pulse hover:bg-red-600" 
+                : isTranscribing 
+                  ? "bg-slate-200 text-slate-600 cursor-wait"
+                  : "text-slate-500 hover:text-primary-900 hover:bg-slate-200/60"
+            )}
+          >
+            {isTranscribing ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : isRecording ? (
+              <Square className="w-5 h-5 fill-white" />
+            ) : (
+              <Mic className="w-5 h-5" />
+            )}
           </button>
           
           <textarea
@@ -330,22 +474,26 @@ export default function AskTriNetra() {
                 handleSendMessage(inputValue);
               }
             }}
-            placeholder="Query the database, search narratives, or map criminal networks..."
+            placeholder={
+              lang === 'KN' 
+                ? "ಕನ್ನಡದಲ್ಲಿ ಪ್ರಶ್ನೆಯನ್ನು ಬರೆಯಿರಿ (ಉದಾ: 2025 ರಲ್ಲಿ ಬೆಂಗಳೂರಿನಲ್ಲಿ ಎಷ್ಟು ಪ್ರಕರಣಗಳು ಸಲ್ಲಿಕೆಯಾಗಿವೆ?)..." 
+                : "Query database, search narratives, or speak voice queries in English/Kannada..."
+            }
             className="flex-1 max-h-32 min-h-[44px] bg-transparent resize-none py-2.5 px-2 focus:outline-none text-slate-900 placeholder:text-slate-400"
             rows={1}
-            disabled={isLoading}
+            disabled={isLoading || isTranscribing}
           />
 
           <button 
             onClick={() => handleSendMessage(inputValue)}
-            disabled={isLoading || !inputValue.trim()}
-            className="p-2.5 bg-primary-900 text-accent-500 hover:bg-primary-800 disabled:opacity-50 disabled:hover:bg-primary-900 transition-colors rounded-lg flex items-center justify-center"
+            disabled={isLoading || isTranscribing || !inputValue.trim()}
+            className="p-2.5 bg-primary-900 text-accent-500 hover:bg-primary-800 disabled:opacity-50 disabled:hover:bg-primary-900 transition-colors rounded-lg flex items-center justify-center shrink-0"
           >
-            <Send className="w-5 h-5" />
+            {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
           </button>
         </div>
-        <div className="max-w-4xl mx-auto text-center mt-2">
-          <p className="text-[10px] text-slate-400">TriNetra may produce inaccurate results. Verify critical information against official records.</p>
+        <div className="max-w-4xl mx-auto text-center mt-2 flex items-center justify-center gap-2">
+          <p className="text-[10px] text-slate-400">Powered by Sarvam AI Speech-to-Text & Kannada Neural Translation | TriNetra Core Node</p>
         </div>
       </div>
 
