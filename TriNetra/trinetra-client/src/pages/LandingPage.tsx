@@ -6,6 +6,7 @@ import {
   Map,
   UserCheck,
   Bell,
+  Mic,
   ChevronRight,
   Lock,
   MessageSquare,
@@ -158,6 +159,7 @@ export default function LandingPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {[
                 { title: "Ask TriNetra AI", icon: MessageSquare, desc: "Ask queries in natural language and get conversational summaries back with direct SQL and reasoning traces." },
+                { title: "Sarvam Multilingual Voice", icon: Mic, desc: "Record voice queries in Kannada or English using Sarvam AI neural speech-to-text models." },
                 { title: "Case Explorer", icon: FolderSearch, desc: "Search and navigate detailed case registries, history, arrest logs, and court details." },
                 { title: "Criminal Network Analysis", icon: Network, desc: "Traverse multi-hop relationships between co-accused, financial accounts, and transaction layers." },
                 { title: "Crime Analytics Maps", icon: Map, desc: "Visualize spatial density hotspots on Leaflet maps and review category-wise Recharts trend charts." },

@@ -58,6 +58,15 @@ The newest analytical module focuses on dynamic clustering and Explainable AI ca
     1. **Narrative Semantic Math:** Executes `1 - (e1.EmbeddingVector <=> e2.EmbeddingVector)` in Postgres to calculate cosine distance. High correlations (>0.6) heavily boost the score.
     2. **MO Overlap:** Executes self-JOINs on `ModusOperandi` to find identical tags shared between the two cases.
     3. **Spatio-Temporal Decay:** Calculates raw Euclidean distance between coordinates (`(lat1-lat2)^2 + (lng1-lng2)^2`) and absolute time difference (`days`).
+
+### 3.3 Sarvam AI Voice & Translation Engine (`sarvam_engine.py`) **[NEW]**
+Integrates state-of-the-art indic language models to enable Voice-to-SQL and Cross-lingual queries.
+- **Speech-to-Text Pipeline (`/api/sarvam/stt`):**
+  - Accepts binary WebM/WAV audio blobs via `multipart/form-data`.
+  - Dispatches to Sarvam's `saaras:v3` API to generate high-accuracy Kannada or English transcripts.
+- **Language Gating & Translation (`/api/sarvam/translate`):**
+  - Uses `sarvam-translate:v1` to translate Kannada (kn-IN) transcripts into English (en-IN).
+  - **Optimization:** The React frontend acts as a gatekeeper. If the UI is set to "English", voice queries bypass the translation layer entirely, piping directly to the LLM router to drastically reduce API latency and token costs.
   - **Explainability:** Generates a plain-English array (`explanations`) for the frontend, explicitly stating *why* the AI grouped them together (e.g., "Occurred 4.5km away").
 
 ### 3.3 Graph & Network Engine (`network_engine.py`)

@@ -10,6 +10,10 @@
    - Natural language interface for querying case details, suspects, and crime trends.
    - Intelligent intent routing seamlessly transitions between factual lookup (NL2SQL), vector-based document retrieval (RAG), graph extraction, and statistical analytics.
 
+2. **Multilingual Voice STT & Translation (`engines/sarvam_engine.py`)**
+   - Seamlessly interact with the intelligence platform in Kannada or English using your voice.
+   - Powered by Sarvam AI neural speech-to-text models (`saaras:v3`) and high-fidelity machine translation (`sarvam-translate:v1`).
+
 2. **Graph & Network Analysis (`engines/network_engine.py`, `engines/graph.py`)**
    - Identifies and visualizes relationships between accused individuals, victims, locations, and cases.
    - Powered by `NetworkX` on the backend and rendered interactively via `React Flow` on the frontend.
@@ -51,6 +55,7 @@ TriNetra follows a modern client-server architecture decoupled via REST APIs.
 ### Backend (`trinetra-backend/`)
 - **Core:** Python 3, FastAPI (High-performance asynchronous API framework)
 - **AI/LLM:** Groq API (`groq`), Google Generative AI (`google-genai`) for fast intent detection and RAG.
+- **Multilingual/STT:** Sarvam AI API for Kannada/English Neural Translation and Speech-to-Text.
 - **Database Connectivity:** PostgreSQL (`psycopg2-binary`) with `pgvector` for semantic similarity.
 - **Network Computation:** `NetworkX` for graph algorithms
 - **Security:** `bcrypt` for password hashing, PyJWT (custom) for token-based auth.
