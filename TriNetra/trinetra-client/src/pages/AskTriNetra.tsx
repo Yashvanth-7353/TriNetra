@@ -96,20 +96,20 @@ export default function AskTriNetra() {
         stream.getTracks().forEach(track => track.stop());
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
         setIsTranscribing(true);
-        setStatusMessage('Sarvam AI: Transcribing audio...');
+        setStatusMessage(lang === 'KN' ? 'Sarvam AI: Transcribing Kannada audio...' : 'Transcribing English audio...');
         try {
-          const langCode = lang === 'KN' ? 'kn-IN' : 'kn-IN'; // Sarvam AI excels at Kannada speech
+          const langCode = lang === 'KN' ? 'kn-IN' : 'en-IN';
           const res = await transcribeAudio(audioBlob, langCode);
           if (res.transcript) {
             setInputValue(res.transcript);
-            setStatusMessage('Sarvam STT: Voice transcribed successfully!');
+            setStatusMessage('Voice transcribed successfully!');
             setTimeout(() => setStatusMessage(null), 3500);
           } else {
-            setStatusMessage('Sarvam STT: No speech recognized.');
+            setStatusMessage('No speech recognized.');
             setTimeout(() => setStatusMessage(null), 3000);
           }
         } catch (err: any) {
-          console.error('Sarvam STT error:', err);
+          console.error('STT error:', err);
           alert('Speech-to-Text failed: ' + err.message);
           setStatusMessage(null);
         } finally {
@@ -119,7 +119,7 @@ export default function AskTriNetra() {
 
       mediaRecorder.start();
       setIsRecording(true);
-      setStatusMessage('Sarvam STT: Recording voice... Click mic to stop.');
+      setStatusMessage('Recording voice... Click mic to stop.');
     } catch (err: any) {
       console.error('Microphone error:', err);
       alert('Microphone access denied or not supported by browser.');
@@ -141,8 +141,6 @@ export default function AskTriNetra() {
     }
   };
 
-  const isKannadaText = (str: string) => /[\u0C80-\u0CFF]/.test(str);
-
   const handleSendMessage = async (text: string) => {
     if (!text.trim()) return;
 
@@ -159,8 +157,8 @@ export default function AskTriNetra() {
     try {
       let queryForBackend = text;
       
-      // Check if text is in Kannada script or Kannada language mode is active
-      if (isKannadaText(text) || lang === 'KN') {
+      // ONLY use Sarvam AI Translation when in Kannada (KN) mode
+      if (lang === 'KN') {
         setStatusMessage('Sarvam AI: Translating Kannada query to English...');
         try {
           const tr = await translateText(text, 'kn-IN', 'en-IN');
@@ -177,8 +175,8 @@ export default function AskTriNetra() {
 
       let answerText = data.answer || "I'm sorry, I couldn't process that.";
 
-      // Translate response back to Kannada if user is in Kannada mode or typed in Kannada
-      if (lang === 'KN' || isKannadaText(text)) {
+      // ONLY translate response to Kannada when in Kannada (KN) mode
+      if (lang === 'KN') {
         setStatusMessage('Sarvam AI: Translating response to Kannada...');
         try {
           const trAns = await translateText(answerText, 'en-IN', 'kn-IN');
@@ -229,10 +227,17 @@ export default function AskTriNetra() {
             <Bot className="w-5 h-5 text-accent-500" />
             Intelligence Copilot
           </h1>
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-            <Languages className="w-3 h-3 text-emerald-600" />
-            Sarvam AI Active
-          </span>
+          {lang === 'KN' ? (
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <Languages className="w-3 h-3 text-emerald-600" />
+              Sarvam AI Active (KN)
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+              <Globe className="w-3 h-3 text-blue-600" />
+              Direct LLM Mode (EN)
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <button 
@@ -240,13 +245,13 @@ export default function AskTriNetra() {
             className={cn(
               "flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-md border transition-all shadow-sm",
               lang === 'KN' 
-                ? "bg-primary-900 text-white border-primary-900" 
+                ? "bg-primary-900 text-white border-primary-900 shadow-md" 
                 : "bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200"
             )}
             title="Toggle between English and Kannada (Sarvam AI translation)"
           >
             <Globe className="w-3.5 h-3.5" />
-            {lang === 'EN' ? 'English Mode' : 'ಕನ್ನಡ (Sarvam AI)'}
+            {lang === 'EN' ? 'Switch to ಕನ್ನಡ' : 'Switch to English'}
           </button>
           <button 
             onClick={handleExport}
