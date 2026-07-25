@@ -1,0 +1,4 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,/api/chat [factual_lookup],"ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)",8,2026-07-25T10:32:40Z,2026-07-25T10:35:10Z
+POST,/api/chat [network_analysis],"ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)",1,2026-07-25T10:33:48Z,2026-07-25T10:33:48Z
+POST,/api/chat [narrative_rag],"ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)",4,2026-07-25T10:33:09Z,2026-07-25T10:35:16Z

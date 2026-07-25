@@ -1,0 +1,13 @@
+{
+  "gangs": [
+    {"name": "Interstate MV Theft Ring - Corridor A", "case_ids": [2801,2802,2803,2804,2805,2806,2807,2808,2809], "member_names": ["Yamuna Gowda","Roopa Rao","Ayesha Poojary","Radha Reddy","Harish Reddy"]},
+    {"name": "Interstate MV Theft Ring - Corridor B", "case_ids": [2810,2811,2812,2813,2814,2815,2816], "member_names": ["Usha Hegde","Thimmaiah Setty","Thimmaiah Reddy","Anthony Sheikh"]},
+    {"name": "OTP/Cyber Fraud Call Ring", "case_ids": [2817,2818,2819,2820,2821,2822,2823,2824,2825,2826], "member_names": ["Radha Patil","Nataraj Shetty","Puneeth Achar","Vijayalakshmi Naik","Prakash Hegde","Imran Naik"]},
+    {"name": "Loan-App Harassment Ring", "case_ids": [2827,2828,2829,2830,2831,2832], "member_names": ["Meena Setty","Suresh Patil","Zameer Fernandes","Nataraj Poojary"]},
+    {"name": "NDPS Trafficking Network - South", "case_ids": [2833,2834,2835,2836,2837,2838,2839,2840], "member_names": ["Ayesha Sheikh","Vani Naik","Triveni Achar","Zameer Shetty","Vijayalakshmi Setty"]},
+    {"name": "NDPS Trafficking Network - North", "case_ids": [2841,2842,2843,2844,2845,2846], "member_names": ["Latha Setty","Basavaraj Naik","Radha Khan","Yogesh Nair"]},
+    {"name": "ATM Skimming / Dacoity Crew", "case_ids": [2847,2848,2849,2850,2851,2852,2853], "member_names": ["Ayesha Sheikh","Nataraj Shetty","Nandini Patil","Manjunath Rao","Zameer Rao"]},
+    {"name": "Chain Snatching Gang - Bus Corridor", "case_ids": [2854,2855,2856,2857,2858,2859,2860,2861], "member_names": ["Thimmaiah Gowda","Yusuf Shetty","Yogesh Nair","Mahesh Fernandes"]}
+  ],
+  "known_data_limitation": "The synthetic name pool (~750 first+last name combinations across ~3,827 accused rows) produces incidental name collisions beyond these designed gangs - e.g. 'Nataraj Shetty' and 'Ayesha Sheikh' each appear in two different designed gangs above by coincidence, and hundreds more names collide across unrelated organic cases. Any benchmark relying on name-based entity resolution will inherit this noise. Treat only the case_ids listed here as verified ground truth for precision/recall scoring; don't trust raw name-repetition counts as ground truth."
+}

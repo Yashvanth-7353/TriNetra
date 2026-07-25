@@ -11,7 +11,8 @@ import {
   User,
   LogOut,
   Shield,
-  Layers
+  Layers,
+  Server
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../context/AuthContext';
@@ -25,6 +26,7 @@ const navItems = [
   { path: '/pattern-analytics', label: 'Pattern Analytics', icon: Layers },
   { path: '/offenders', label: 'Offender Profiles', icon: UserX },
   { path: '/alerts', label: 'Prevention Alerts', icon: BellRing },
+  { path: '/architecture', label: 'Architecture Diagram', icon: Server },
   { path: '/profile', label: 'My Profile', icon: User },
 ];
 

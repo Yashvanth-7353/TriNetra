@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import ArchitecturePage from './ArchitecturePage';
 import {
   Shield,
   Brain,
@@ -14,10 +16,13 @@ import {
   FolderSearch,
   Code,
   Briefcase,
-  Globe
+  Globe,
+  Server
 } from 'lucide-react';
 
 export default function LandingPage() {
+  const [showArchitecture, setShowArchitecture] = useState(false);
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-accent-200 selection:text-primary-900 flex flex-col">
       {/* Header/Nav */}
@@ -32,7 +37,14 @@ export default function LandingPage() {
               TRINETRA
             </span>
           </div>
-          <div>
+          <div className="flex items-center gap-6">
+            <button
+              onClick={() => setShowArchitecture(true)}
+              className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 hover:text-primary-900 transition-colors"
+            >
+              <Server className="w-4 h-4" />
+              Architecture Diagram
+            </button>
             <Link
               to="/login"
               className="inline-flex items-center justify-center gap-2 px-5 py-2 rounded-md font-medium text-sm text-white bg-primary-900 hover:bg-primary-800 transition-all duration-200 shadow-sm hover:shadow-md hover:-translate-y-0.5"
@@ -205,6 +217,7 @@ export default function LandingPage() {
                 <li><Link to="/login" className="hover:text-accent-500 transition-colors">Network Analysis</Link></li>
                 <li><Link to="/login" className="hover:text-accent-500 transition-colors">Crime Analytics</Link></li>
                 <li><Link to="/login" className="hover:text-accent-500 transition-colors">Prevention Alerts</Link></li>
+                <li><Link to="/login" className="hover:text-accent-500 transition-colors">System Architecture</Link></li>
               </ul>
             </div>
 
@@ -262,6 +275,12 @@ export default function LandingPage() {
           </div>
         </div>
       </footer>
+
+      {showArchitecture && (
+        <div className="fixed top-16 left-0 right-0 bottom-0 z-40 bg-white overflow-hidden flex flex-col">
+          <ArchitecturePage onClose={() => setShowArchitecture(false)} />
+        </div>
+      )}
     </div>
   );
 }
