@@ -7,7 +7,7 @@ import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename={window.location.pathname.startsWith('/app') ? '/app' : '/'}>
       <AuthProvider>
         <App />
       </AuthProvider>
