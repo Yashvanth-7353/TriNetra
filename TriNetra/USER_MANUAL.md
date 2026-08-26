@@ -23,16 +23,26 @@ This document provides a comprehensive breakdown of every page, feature, and int
 
 ---
 
-## 3. Ask TriNetra (Conversational AI Orchestrator)
+### 3. Ask TriNetra (Conversational AI Orchestrator)
 
 **Purpose:** An intelligent, ChatGPT-like interface designed to answer natural language questions about crimes, suspects, and statistics without requiring the officer to manually build SQL queries.
-- **Input Field:** A free-text chat bar at the bottom.
-- **Functionality:** 
-  - **Factual Lookup:** If you ask "Show me murders in Mysore last month," the AI converts this to a database query and returns a formatted table within the chat.
-  - **Narrative RAG:** If you ask "Are there any cases involving a red getaway car?", the AI reads through thousands of unstructured FIR narratives (`BriefFacts`) and synthesizes an answer with specific case citations.
-  - **Graph Triggers:** If you ask "Who is connected to Ramesh?", the chat bubble will natively embed and render an interactive criminal network graph.
-- **Actions:** 
-  - **Print / Export Report Button:** Located at the top right, this button compiles the entire chat history (including tables, graphs, and citations) into a beautifully formatted, printable HTML/PDF official report.
+
+**Input Methods:**
+
+* A free-text chat bar at the bottom allows for standard text queries.
+* Voice integration allows you to seamlessly interact with the intelligence platform in Kannada or English using your voice.
+
+**Functionality:**
+
+* **Factual Lookup:** If you ask "Show me murders in Mysore last month," the AI converts this to a database query and returns a formatted table within the chat.
+* **Narrative RAG:** If you ask "Are there any cases involving a red getaway car?", the AI reads through thousands of unstructured FIR narratives (`BriefFacts`) and synthesizes an answer with specific case citations.
+* **Graph Triggers:** If you ask "Who is connected to Ramesh?", the chat bubble will natively embed and render an interactive criminal network graph.
+* **Multilingual STT Pipeline:** The interface accepts binary WebM/WAV audio blobs and dispatches them to Sarvam's `saaras:v3` API to generate high-accuracy Kannada or English transcripts.
+* **Language Gating & Translation:** It uses `sarvam-translate:v1` to translate Kannada (kn-IN) transcripts into English (en-IN). If the UI is set to "English", voice queries bypass the translation layer entirely, piping directly to the LLM router to drastically reduce API latency and token costs.
+
+**Actions:**
+
+* **Print / Export Report Button:** Located at the top right, this button compiles the entire chat history (including tables, graphs, and citations) into a beautifully formatted, printable HTML/PDF official report.
 
 ---
 

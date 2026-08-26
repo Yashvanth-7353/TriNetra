@@ -34,7 +34,7 @@ class IntentRouter:
         try:
             response = self.groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 temperature=0
             )
             return response.choices[0].message.content.strip()
@@ -65,7 +65,7 @@ class IntentRouter:
         try:
             response = self.groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -91,7 +91,7 @@ class IntentRouter:
         try:
             response = self.groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 temperature=0
             )
             # Safely parse the first number found in the response

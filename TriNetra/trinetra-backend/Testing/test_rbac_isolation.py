@@ -22,8 +22,8 @@ CHAT_ENDPOINT = f"{API_BASE}/api/chat"
 
 # Set real passwords for these test accounts in your dev/staging environment before running.
 TEST_ACCOUNTS = {
-    "broad_scope_supervisor": {"employee_id": 96, "password": "CHANGE_ME"},
-    "narrow_scope_investigator": {"employee_id": 275, "password": "CHANGE_ME"},
+    "broad_scope_supervisor": {"employee_id": 96, "password": 1234},
+    "narrow_scope_investigator": {"employee_id": 275, "password": 1234},
 }
 
 

@@ -64,7 +64,7 @@ class NL2SQLEngine:
         # ... rest of the generate_sql execution remains the same
         response = self.groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             temperature=0
         )
         sql = response.choices[0].message.content.strip()
