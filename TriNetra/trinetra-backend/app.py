@@ -2,7 +2,7 @@ import os
 import time
 import json
 import re
-from fastapi import FastAPI, HTTPException, Header, Query, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Header, Query, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -32,6 +32,7 @@ from engines.evidence_graph import EvidenceGraphBuilder
 from engines.forecasting import CrimeForecastingEngine
 from engines.predictive_hotspots import PredictiveHotspotEngine
 from engines.next_best_action import NextBestActionEngine
+from engines.financial_intelligence import FinancialIntelligenceEngine, FinancialLeadGenerator
 from engines.auth import authenticate_employee, create_jwt_token, verify_jwt_token, get_employee_profile
 
 investigation_engine = InvestigationEngine()
@@ -39,6 +40,8 @@ evidence_graph_builder = EvidenceGraphBuilder()
 forecasting_engine = CrimeForecastingEngine()
 predictive_hotspot_engine = PredictiveHotspotEngine()
 next_best_action_engine = NextBestActionEngine()
+financial_intelligence_engine = FinancialIntelligenceEngine()
+financial_lead_generator = FinancialLeadGenerator()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -1219,4 +1222,129 @@ async def sarvam_translate(req: SarvamTranslateRequest):
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sarvam Translate failed: {str(e)}")
+
+# ================================================================
+#  Financial Intelligence Endpoints
+# ================================================================
+
+class FinancialAnalysisRequest(BaseModel):
+    accused_ids: Optional[list[int]] = None
+    case_ids: Optional[list[int]] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    include_leads: bool = True
+
+@app.post("/api/financial/analyze")
+async def analyze_financial(
+    request: FinancialAnalysisRequest,
+    token_data: dict = Depends(verify_jwt_token)
+):
+    """Analyzes financial relationships between accused persons, accounts, and transactions."""
+    auth_context = get_employee_profile(token_data)
+    try:
+        result = financial_intelligence_engine.analyze_financial_relationships(
+            accused_ids=request.accused_ids,
+            case_ids=request.case_ids,
+            date_from=request.date_from,
+            date_to=request.date_to,
+        )
+
+        # Generate financial leads
+        if request.include_leads:
+            leads = financial_lead_generator.generate_leads(result)
+            result["leads"] = leads
+        else:
+            result["leads"] = []
+
+        # Audit logging
+        try:
+            from engines.audit import AuditLogger
+            logger = AuditLogger()
+            logger.log(
+                user_id=auth_context.get("employee_id"),
+                action="financial_analysis",
+                details={
+                    "accused_ids": request.accused_ids,
+                    "case_ids": request.case_ids,
+                    "total_accounts": result["summary"]["total_accounts"],
+                    "total_transactions": result["summary"]["total_transactions"],
+                    "leads_generated": len(result["leads"]),
+                }
+            )
+        except Exception:
+            pass
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Financial analysis failed: {str(e)}")
+
+@app.get("/api/financial/account/{account_id}")
+async def get_account_detail(
+    account_id: int,
+    token_data: dict = Depends(verify_jwt_token)
+):
+    """Returns detailed information about a specific suspect account."""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(os.getenv('NEON_DATABASE_URL'))
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT sa.AccountID, sa.AccountNumber, sa.BankName, sa.IFSC,
+                   a.AccusedMasterID, a.AccusedName,
+                   cm.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate
+            FROM SuspectAccount sa
+            LEFT JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
+            LEFT JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
+            WHERE sa.AccountID = %s
+        """, (account_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        # Get transactions
+        cur.execute("""
+            SELECT ft.TxnID, ft.Amount, ft.TxnDate, ft.Flagged,
+                   sa2.AccountNumber, sa2.BankName, a2.AccusedName,
+                   cm.CrimeNo, 'outgoing' as direction
+            FROM FinancialTransaction ft
+            JOIN SuspectAccount sa2 ON ft.ToAccountID = sa2.AccountID
+            LEFT JOIN Accused a2 ON sa2.AccusedMasterID = a2.AccusedMasterID
+            LEFT JOIN CaseMaster cm ON ft.CaseMasterID = cm.CaseMasterID
+            WHERE ft.FromAccountID = %s
+            UNION ALL
+            SELECT ft.TxnID, ft.Amount, ft.TxnDate, ft.Flagged,
+                   sa2.AccountNumber, sa2.BankName, a2.AccusedName,
+                   cm.CrimeNo, 'incoming' as direction
+            FROM FinancialTransaction ft
+            JOIN SuspectAccount sa2 ON ft.FromAccountID = sa2.AccountID
+            LEFT JOIN Accused a2 ON sa2.AccusedMasterID = a2.AccusedMasterID
+            LEFT JOIN CaseMaster cm ON ft.CaseMasterID = cm.CaseMasterID
+            WHERE ft.ToAccountID = %s
+            ORDER BY 3
+        """, (account_id, account_id))
+        txns = []
+        for t in cur.fetchall():
+            acct_masked = f"XXXX-{t[4][-4:]}" if t[4] and len(t[4]) >= 4 else t[4]
+            txns.append({
+                "txn_id": t[0], "amount": float(t[1]), "txn_date": str(t[2]) if t[2] else None,
+                "flagged": bool(t[3]), "counterparty_account": acct_masked,
+                "counterparty_bank": t[5], "counterparty_person": t[6],
+                "crime_no": t[7], "direction": t[8],
+            })
+
+        conn.close()
+        acct_masked = f"XXXX-{row[1][-4:]}" if row[1] and len(row[1]) >= 4 else row[1]
+        return {
+            "account_id": row[0], "account_number_masked": acct_masked,
+            "bank_name": row[2], "ifsc": row[3],
+            "accused_master_id": row[4], "accused_name": row[5],
+            "case_master_id": row[6], "crime_no": row[7],
+            "crime_registered_date": str(row[8]) if row[8] else None,
+            "transactions": txns,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Account lookup failed: {str(e)}")
+
 

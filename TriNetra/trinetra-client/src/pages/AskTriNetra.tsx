@@ -663,6 +663,7 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
       case 'pattern_detection': return '📊';
       case 'narrative_rag': return '📝';
       case 'trend_analysis': return '📈';
+      case 'financial_intelligence': return '💰';
       default: return '⚙️';
     }
   };
@@ -674,6 +675,7 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
     'Criminal Network Analysis',
     'Offender Risk Assessment',
     'Cases Identified',
+    'Financial Intelligence',
   ];
 
   const displayFindings = findings.filter(f => 
@@ -824,6 +826,42 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
                           p.score >= 80 ? "text-red-600" : p.score >= 50 ? "text-amber-600" : "text-emerald-600"
                         )}>{p.score}/100</span>
                         {p.repeat_offender && <span className="text-red-500 font-bold">REPEAT</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Inline Financial Intelligence */}
+                {finding.category === 'Financial Intelligence' && !isWhyActive && (
+                  <div className="mt-2 space-y-2">
+                    {finding.data?.summary && (
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="text-center p-2 bg-white rounded border border-indigo-100">
+                          <div className="text-sm font-bold text-indigo-700">{finding.data.summary.total_transactions}</div>
+                          <div className="text-[9px] text-slate-500">Transactions</div>
+                        </div>
+                        <div className="text-center p-2 bg-white rounded border border-indigo-100">
+                          <div className="text-sm font-bold text-indigo-700">{finding.data.summary.cross_case_links}</div>
+                          <div className="text-[9px] text-slate-500">Cross-Case Links</div>
+                        </div>
+                        <div className="text-center p-2 bg-white rounded border border-indigo-100">
+                          <div className="text-sm font-bold text-indigo-700">{finding.data.summary.anomalies_detected}</div>
+                          <div className="text-[9px] text-slate-500">Anomalies</div>
+                        </div>
+                      </div>
+                    )}
+                    {finding.data?.cross_case_links?.slice(0, 3).map((link: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 text-[10px] bg-amber-50 p-2 rounded border border-amber-100">
+                        <span className="font-bold text-amber-700">🔗</span>
+                        <span className="font-bold text-slate-800">{link.accused_name}</span>
+                        <span className="text-slate-500">— {link.bank_name} ({link.account_masked})</span>
+                        <span className="text-amber-600 font-bold">{link.case_count} cases</span>
+                      </div>
+                    ))}
+                    {finding.data?.anomalies?.slice(0, 3).map((a: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 text-[10px] bg-red-50 p-2 rounded border border-red-100">
+                        <span className="font-bold text-red-600">⚠</span>
+                        <span className="font-bold text-slate-800">{a.title}</span>
                       </div>
                     ))}
                   </div>

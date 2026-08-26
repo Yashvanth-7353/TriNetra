@@ -16,6 +16,7 @@ import PatternAnalytics from './pages/PatternAnalytics';
 import OffenderProfiles from './pages/OffenderProfiles';
 import PreventionAlerts from './pages/PreventionAlerts';
 import CrimeForecastPage from './pages/CrimeForecastPage';
+import FinancialTrailPage from './pages/FinancialTrailPage';
 import Profile from './pages/Profile';
 import ArchitecturePage from './pages/ArchitecturePage';
 
@@ -37,6 +38,7 @@ function App() {
         <Route path="/offenders" element={<OffenderProfiles />} />
         <Route path="/alerts" element={<PreventionAlerts />} />
         <Route path="/forecast" element={<CrimeForecastPage />} />
+        <Route path="/financial-trail" element={<FinancialTrailPage />} />
         <Route path="/architecture" element={<ArchitecturePage />} />
         
         <Route path="/profile" element={<Profile />} />

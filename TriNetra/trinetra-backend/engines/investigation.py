@@ -44,6 +44,7 @@ class InvestigationPlanner:
         "pattern_detection",# MO-based pattern clustering
         "narrative_rag",    # Vector semantic search
         "trend_analysis",   # Temporal crime trends
+        "financial_intelligence", # Financial relationship analysis
     ]
 
     def __init__(self):
@@ -82,6 +83,7 @@ ENGINES AVAILABLE:
 5. "pattern_detection" — Finds emerging MO-based crime clusters. Use when: the investigator wants to see if there are suspicious patterns or clusters of similar crimes.
 6. "narrative_rag" — Semantic search over FIR narratives. Use when: the investigator describes a scenario or method and wants to find matching cases by narrative similarity.
 7. "trend_analysis" — Temporal aggregation of cases. Use when: the investigator wants to see how crime volume changes over time.
+8. "financial_intelligence" — Financial relationship analysis. Use when: the investigator wants to trace money trails, examine suspect bank accounts, find cross-case financial links, or analyze financial connections between accused persons.
 
 FILTERS that can be extracted:
 - district_name: string (e.g. "Bengaluru Urban")
@@ -124,7 +126,9 @@ RULES:
 - If the request mentions a specific case (CaseMasterID or CrimeNo), include "case_similarity".
 - If the request mentions a specific person/accused, include "criminal_network" and/or "risk_profile".
 - If the request asks about patterns, trends, or clusters, include "pattern_detection" or "trend_analysis".
+- If the request asks about financial connections, money trails, bank accounts, or financial relationships, include "financial_intelligence".
 - If the request is about finding cases matching a description, include "case_query" or "narrative_rag".
+- For most investigations, include "case_query" and "financial_intelligence" together to get both case and financial evidence.
 - For follow-up questions that reference previous results, use the conversation history to resolve references.
 - Do NOT include engines that have no data to work with.
 - Extract real district names, case IDs, and accused IDs from the text when present.
@@ -281,6 +285,31 @@ class InvestigationOrchestrator:
             pass
         return filters
 
+    def _validate_scope(self, filters: dict) -> list:
+        """
+        Detects when explicitly requested scopes failed to resolve.
+        Returns a list of warnings. Engines should check these before
+        broadening queries.
+        """
+        warnings = []
+        # If user provided a crime category but it didn't resolve
+        crime_cat = filters.get("crime_category")
+        if crime_cat and not filters.get("crime_sub_head_id") and not filters.get("crime_head_id"):
+            warnings.append({
+                "type": "crime_category_unresolved",
+                "requested": crime_cat,
+                "message": f"Crime category '{crime_cat}' could not be resolved to a database ID.",
+            })
+        # If user provided a district but it didn't resolve
+        dist_name = filters.get("district_name")
+        if dist_name and not filters.get("district_id"):
+            warnings.append({
+                "type": "district_unresolved",
+                "requested": dist_name,
+                "message": f"District '{dist_name}' could not be resolved to a database ID.",
+            })
+        return warnings
+
     def execute_plan(self, plan: dict, rbac_filter: str,
                      nl2sql_engine, rag_engine, graph_engine,
                      network_engine, pattern_engine, analytics_engine,
@@ -294,7 +323,12 @@ class InvestigationOrchestrator:
 
         # Deterministically resolve LLM text filters to database IDs
         filters = self._resolve_scope(filters)
+
+        # Validate scope resolution — detect when explicitly requested scopes failed
+        scope_warnings = self._validate_scope(filters)
+        filters["_scope_warnings"] = scope_warnings
         plan["filters"] = filters  # Update plan with resolved IDs
+        plan["scope_warnings"] = scope_warnings
 
         entities = plan.get("entities", {})
         engines_to_run = plan.get("engines", [])
@@ -357,6 +391,19 @@ class InvestigationOrchestrator:
                 )
             items = self._run_risk_profiles(
                 list(discovered_accused)[:20], analytics_engine
+            )
+            evidence_items.extend(items)
+
+        # Phase 8: Financial intelligence (depends on discovered_accused + discovered_cases)
+        if "financial_intelligence" in engines_to_run or "financial" in engines_to_run:
+            if not discovered_accused and discovered_cases:
+                discovered_accused = self._extract_accused_from_cases(
+                    discovered_cases, rbac_filter
+                )
+            items = self._run_financial_analysis(
+                list(discovered_accused)[:20],
+                list(discovered_cases)[:10],
+                filters,
             )
             evidence_items.extend(items)
 
@@ -478,7 +525,35 @@ class InvestigationOrchestrator:
             district_id = filters.get("district_id")
             time_window = filters.get("time_window")
 
+            # Check if user explicitly requested a scope that couldn't be resolved
+            scope_warnings = filters.get("_scope_warnings", [])
+            crime_cat_requested = filters.get("crime_category") and not scoped_crime_id
+            district_requested = filters.get("district_name") and not district_id
+
+            if crime_cat_requested:
+                # User asked for specific crime category but it couldn't be resolved
+                items.append({
+                    "engine": "pattern_detection",
+                    "type": "scope_error",
+                    "data": {"error": f"Crime category '{filters.get('crime_category')}' could not be resolved."},
+                    "signal": f"Pattern analysis skipped: scope '{filters.get('crime_category')}' not found in database.",
+                    "strength": "none",
+                })
+                return items
+
+            if district_requested:
+                # User asked for specific district but it couldn't be resolved
+                items.append({
+                    "engine": "pattern_detection",
+                    "type": "scope_error",
+                    "data": {"error": f"District '{filters.get('district_name')}' could not be resolved."},
+                    "signal": f"Pattern analysis skipped: district '{filters.get('district_name')}' not found.",
+                    "strength": "none",
+                })
+                return items
+
             # If we have a scoped method, use it; otherwise fall back to unscoped
+            # The unscoped fallback is only appropriate when NO specific scope was requested
             if hasattr(pattern_engine, 'get_scoped_patterns') and (scoped_crime_id or district_id):
                 result = pattern_engine.get_scoped_patterns(
                     crime_head_id=scoped_crime_id,
@@ -486,6 +561,7 @@ class InvestigationOrchestrator:
                     time_window=time_window,
                 )
             else:
+                # No specific scope requested — use general emerging patterns
                 result = pattern_engine.get_emerging_patterns()
 
             if "error" not in result and result.get("patterns"):
@@ -668,6 +744,74 @@ class InvestigationOrchestrator:
             })
         return items
 
+    def _run_financial_analysis(self, accused_ids: list, case_ids: list, filters: dict) -> list:
+        """Execute financial intelligence analysis for investigation entities."""
+        items = []
+        if not accused_ids and not case_ids:
+            return items
+        try:
+            from engines.financial_intelligence import FinancialIntelligenceEngine, FinancialLeadGenerator
+            fin_engine = FinancialIntelligenceEngine()
+            fin_leads = FinancialLeadGenerator()
+
+            date_from = filters.get("date_from")
+            date_to = filters.get("date_to")
+
+            result = fin_engine.analyze_financial_relationships(
+                accused_ids=accused_ids if accused_ids else None,
+                case_ids=case_ids if case_ids else None,
+                date_from=date_from,
+                date_to=date_to,
+            )
+
+            # Generate financial leads
+            leads = fin_leads.generate_leads(result)
+
+            if result["summary"]["total_transactions"] > 0:
+                items.append({
+                    "engine": "financial_intelligence",
+                    "type": "financial_intelligence",
+                    "data": {
+                        "accounts": result["accounts"],
+                        "counterparty_accounts": result.get("counterparty_accounts", []),
+                        "transactions": result["transactions"],
+                        "cross_case_links": result["cross_case_links"],
+                        "shared_accounts": result["shared_accounts"],
+                        "transaction_chains": result.get("transaction_chains", []),
+                        "anomalies": result["anomalies"],
+                        "graph": result["graph"],
+                        "summary": result["summary"],
+                        "leads": leads,
+                    },
+                    "signal": (
+                        f"Financial analysis: {result['summary']['total_transactions']} transactions, "
+                        f"{result['summary']['cross_case_links']} cross-case links, "
+                        f"{len(leads)} financial leads"
+                    ),
+                    "strength": (
+                        "strong" if result["summary"]["cross_case_links"] > 0
+                        else "moderate" if result["summary"]["total_transactions"] > 0
+                        else "limited"
+                    ),
+                })
+            else:
+                items.append({
+                    "engine": "financial_intelligence",
+                    "type": "financial_intelligence",
+                    "data": {"summary": result["summary"], "leads": []},
+                    "signal": "No financial transactions found for investigation entities",
+                    "strength": "limited",
+                })
+        except Exception as e:
+            items.append({
+                "engine": "financial_intelligence",
+                "type": "error",
+                "data": {"error": str(e)},
+                "signal": f"Financial analysis error: {str(e)[:100]}",
+                "strength": "limited",
+            })
+        return items
+
     def _extract_accused_from_cases(self, case_ids: set, rbac_filter: str) -> set:
         """Extract AccusedMasterIDs from a set of CaseMasterIDs via direct SQL."""
         accused_ids = set()
@@ -805,6 +949,18 @@ class EvidenceFusion:
             for item in risk_items:
                 findings.append({
                     "category": "Offender Risk Assessment",
+                    "description": item["signal"],
+                    "evidence_sources": [item["engine"]],
+                    "data": item["data"],
+                    "strength": item["strength"],
+                })
+
+        # ── Finding 8: Financial Intelligence ──
+        financial_items = [e for e in successful if e["type"] == "financial_intelligence"]
+        if financial_items:
+            for item in financial_items:
+                findings.append({
+                    "category": "Financial Intelligence",
                     "description": item["signal"],
                     "evidence_sources": [item["engine"]],
                     "data": item["data"],

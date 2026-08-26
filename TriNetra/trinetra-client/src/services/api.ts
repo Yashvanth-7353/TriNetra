@@ -1246,6 +1246,132 @@ export async function fetchNextBestActions(
   return response.json();
 }
 
+// ── Financial Intelligence ──
+
+export interface FinancialAccount {
+  account_id: number;
+  accused_master_id: number;
+  account_number: string;
+  bank_name: string;
+  ifsc: string | null;
+  accused_name: string;
+  case_master_id: number;
+  crime_no: string;
+  crime_registered_date: string | null;
+  is_counterparty: boolean;
+}
+
+export interface FinancialTransaction {
+  txn_id: number;
+  from_account_id: number;
+  to_account_id: number;
+  amount: number;
+  txn_date: string | null;
+  case_master_id: number;
+  flagged: boolean;
+  from_account_masked: string;
+  from_bank: string;
+  to_account_masked: string;
+  to_bank: string;
+  from_person: string;
+  to_person: string;
+  crime_no: string;
+}
+
+export interface FinancialCrossCaseLink {
+  account_id: number;
+  account_masked: string;
+  bank_name: string;
+  accused_name: string;
+  connected_cases: number[];
+  case_count: number;
+  transaction_count: number;
+}
+
+export interface FinancialAnomaly {
+  type: string;
+  title: string;
+  reason: string;
+  evidence: Record<string, any>;
+}
+
+export interface FinancialGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  label: string;
+  data: Record<string, any>;
+}
+
+export interface FinancialGraph {
+  nodes: Array<{
+    id: string;
+    type: string;
+    label: string;
+    data: Record<string, any>;
+  }>;
+  edges: FinancialGraphEdge[];
+}
+
+export interface FinancialLead {
+  lead_type: string;
+  title: string;
+  reason: string;
+  evidence_signals: string[];
+  source_engines: string[];
+  action: string;
+  action_type: string;
+  target: { entity_type: string; entity_id: any };
+}
+
+export interface FinancialAnalysisResponse {
+  accounts: FinancialAccount[];
+  counterparty_accounts: FinancialAccount[];
+  transactions: FinancialTransaction[];
+  cross_case_links: FinancialCrossCaseLink[];
+  shared_accounts: any[];
+  transaction_chains: any[];
+  anomalies: FinancialAnomaly[];
+  graph: FinancialGraph;
+  leads: FinancialLead[];
+  summary: {
+    total_accounts: number;
+    total_transactions: number;
+    total_amount: number;
+    flagged_transactions: number;
+    flagged_amount: number;
+    cross_case_links: number;
+    anomalies_detected: number;
+    unique_persons: number;
+    unique_cases: number;
+  };
+  scope: Record<string, any>;
+}
+
+export async function fetchFinancialAnalysis(
+  accusedIds?: number[],
+  caseIds?: number[]
+): Promise<FinancialAnalysisResponse> {
+  const response = await fetch(`${API_BASE}/api/financial/analyze`, {
+    method: 'POST',
+    headers: {
+      ...authHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      accused_ids: accusedIds || null,
+      case_ids: caseIds || null,
+      include_leads: true,
+    }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Financial analysis failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function transcribeAudio(audioBlob: Blob, languageCode: string = 'kn-IN'): Promise<{ transcript: string }> {
   const formData = new FormData();
   formData.append('file', audioBlob, 'speech.wav');

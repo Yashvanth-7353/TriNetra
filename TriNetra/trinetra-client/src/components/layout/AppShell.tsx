@@ -15,7 +15,8 @@ import {
   Server,
   Menu,
   X,
-  Radar
+  Radar,
+  Banknote
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../context/AuthContext';
@@ -30,6 +31,7 @@ const navItems = [
   { path: '/offenders', label: 'Offender Profiles', icon: UserX },
   { path: '/alerts', label: 'Prevention Alerts', icon: BellRing },
   { path: '/forecast', label: 'Crime Forecast', icon: Radar },
+  { path: '/financial-trail', label: 'Financial Trail', icon: Banknote },
   { path: '/architecture', label: 'Architecture Diagram', icon: Server },
   { path: '/profile', label: 'My Profile', icon: User },
 ];
