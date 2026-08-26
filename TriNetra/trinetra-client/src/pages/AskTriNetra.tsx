@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { sendChatQuery, exportChat, transcribeAudio, translateText, type ChatResponse } from '../services/api';
+import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, exportChat, transcribeAudio, translateText, type EvidenceEdge, type EvidenceNode } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
+import EvidenceGraph from '../components/EvidenceGraph';
+import EvidencePanel from '../components/EvidencePanel';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 
 export interface Message {
@@ -21,9 +23,16 @@ export interface Message {
     type: 'trend' | 'risk';
     data: any;
   } | null;
+  investigation?: {
+    plan: any;
+    findings: any[];
+    summary_stats: any;
+    evidence_graph: any[];
+  } | null;
 }
 
 const examplePrompts = [
+  { q: "Investigate the recent vehicle theft pattern in Bengaluru and find repeat offenders.", desc: "proves multi-engine investigation planner" },
   { q: "How many cases were registered in Bengaluru Urban in 2025?", desc: "proves tier-4 factual sql generation" },
   { q: "Are there any cases involving a fraudulent online transaction near Mysuru?", desc: "proves narrative rag" },
   { q: "Who is connected to accused 3682?", desc: "proves graph triggering & inline canvas embedding" },
@@ -31,7 +40,6 @@ const examplePrompts = [
   { q: "Is there anything unusual happening with digital arrest scams recently?", desc: "proves early warning/pattern search" },
   { q: "Find cases similar to CaseMasterID 2817.", desc: "proves tri-signal pgvector case similarity engine" },
   { q: "What is the risk profile for accused 3682?", desc: "proves risk scoring" },
-  { q: "Find cases similar to CaseMasterID 9", desc: "proves similarity works even with 0 named suspects" }
 ];
 
 export default function AskTriNetra() {
@@ -170,8 +178,17 @@ export default function AskTriNetra() {
         }
       }
 
-      setStatusMessage('TriNetra Engine: Processing query...');
-      const data: ChatResponse = await sendChatQuery(queryForBackend);
+      // Detect investigation request vs normal query
+      const isInvestigation = isInvestigationRequest(text);
+      
+      let data: any;
+      if (isInvestigation) {
+        setStatusMessage('TriNetra: Running multi-engine investigation...');
+        data = await sendInvestigationQuery(queryForBackend);
+      } else {
+        setStatusMessage('TriNetra Engine: Processing query...');
+        data = await sendChatQuery(queryForBackend);
+      }
 
       let answerText = data.answer || "I'm sorry, I couldn't process that.";
 
@@ -197,6 +214,7 @@ export default function AskTriNetra() {
         reasoning_trace: data.reasoning_trace,
         graph_data: data.graph_data,
         analytics_data: data.analytics_data,
+        investigation: data.investigation || null,
       };
 
       setMessages((prev) => [...prev, botMessage]);
@@ -391,6 +409,11 @@ export default function AskTriNetra() {
                   </div>
                 )}
 
+                {/* Investigation Findings */}
+                {msg.investigation && msg.investigation.findings && (
+                  <InvestigationFindings findings={msg.investigation.findings} stats={msg.investigation.summary_stats} plan={msg.investigation.plan} />
+                )}
+
                 {/* Citations */}
                 {msg.citations && msg.citations.length > 0 && (
                   <div className="mt-5 pt-4 border-t border-slate-100 flex flex-wrap gap-2 items-center">
@@ -572,6 +595,266 @@ function ReasoningTrace({ steps }: { steps: any[] }) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InvestigationFindings({ findings, stats, plan }: { findings: any[]; stats: any; plan: any }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [activeFindingIdx, setActiveFindingIdx] = useState<number | null>(null);
+  const [evidenceGraph, setEvidenceGraph] = useState<{ nodes: EvidenceNode[]; edges: EvidenceEdge[] } | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<EvidenceEdge | null>(null);
+  const [selectedNode, setSelectedNode] = useState<EvidenceNode | null>(null);
+  const [isLoadingGraph, setIsLoadingGraph] = useState(false);
+  const [graphError, setGraphError] = useState<string | null>(null);
+
+  if (!findings || findings.length === 0) return null;
+
+  const strengthColor = (s: string) => {
+    switch (s) {
+      case 'strong': return 'text-emerald-600 bg-emerald-50 border-emerald-200';
+      case 'moderate': return 'text-amber-600 bg-amber-50 border-amber-200';
+      case 'limited': return 'text-slate-600 bg-slate-50 border-slate-200';
+      default: return 'text-slate-400 bg-slate-50 border-slate-100';
+    }
+  };
+
+  const engineIcon = (engine: string) => {
+    switch (engine) {
+      case 'case_query': return '🔍';
+      case 'case_similarity': return '🔗';
+      case 'criminal_network': return '🕸️';
+      case 'risk_profile': return '⚠️';
+      case 'pattern_detection': return '📊';
+      case 'narrative_rag': return '📝';
+      case 'trend_analysis': return '📈';
+      default: return '⚙️';
+    }
+  };
+
+  // Findings that support WHY (have data with entities)
+  const whyCapableCategories = [
+    'Related Cases (Similarity Analysis)',
+    'Crime Patterns Detected',
+    'Criminal Network Analysis',
+    'Offender Risk Assessment',
+    'Cases Identified',
+  ];
+
+  const displayFindings = findings.filter(f => 
+    f.category !== 'Investigation Overview' && f.category !== 'Engine Failures'
+  );
+  const errors = findings.find(f => f.category === 'Engine Failures');
+
+  const handleWhyClick = async (finding: any, idx: number) => {
+    // Toggle if same finding
+    if (activeFindingIdx === idx) {
+      setActiveFindingIdx(null);
+      setEvidenceGraph(null);
+      setSelectedEdge(null);
+      setSelectedNode(null);
+      return;
+    }
+
+    setActiveFindingIdx(idx);
+    setEvidenceGraph(null);
+    setSelectedEdge(null);
+    setSelectedNode(null);
+    setIsLoadingGraph(true);
+    setGraphError(null);
+
+    try {
+      const result = await sendEvidenceGraph(finding);
+      setEvidenceGraph({ nodes: result.nodes, edges: result.edges });
+    } catch (err: any) {
+      setGraphError(err.message || 'Failed to load evidence graph');
+    } finally {
+      setIsLoadingGraph(false);
+    }
+  };
+
+  const handleViewRecord = (table: string, recordId: any) => {
+    if (table === 'CaseMaster' && recordId) {
+      window.open(`/cases?search=${recordId}`, '_blank');
+    }
+  };
+
+  return (
+    <div className="mt-4 border border-indigo-200 rounded-xl overflow-hidden bg-indigo-50/30">
+      <button 
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-indigo-100/50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm">🔍</span>
+          <span className="text-sm font-bold text-indigo-800">Investigation Results</span>
+          <span className={cn(
+            "text-[10px] font-bold px-2 py-0.5 rounded-full border",
+            strengthColor(stats?.overall_strength || 'none')
+          )}>
+            {stats?.overall_strength?.toUpperCase() || 'UNKNOWN'} EVIDENCE
+          </span>
+        </div>
+        {isExpanded ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />}
+      </button>
+
+      {isExpanded && (
+        <div className="px-4 pb-4 space-y-3 border-t border-indigo-100">
+          {plan && (
+            <div className="mt-3 p-3 bg-white rounded-lg border border-indigo-100">
+              <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-1">Investigation Plan</div>
+              <div className="text-xs text-slate-600">{plan.summary}</div>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {(plan.engines || []).map((e: string, i: number) => (
+                  <span key={i} className="text-[10px] font-medium bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded">
+                    {engineIcon(e)} {e.replace('_', ' ')}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {stats && (
+            <div className="flex items-center gap-3 text-[10px] font-semibold text-slate-500">
+              <span>✅ {stats.engines_succeeded}/{stats.engines_executed} engines</span>
+              {stats.engines_failed > 0 && <span className="text-amber-600">⚠️ {stats.engines_failed} failed</span>}
+              <span>{stats.total_findings} findings</span>
+            </div>
+          )}
+
+          {displayFindings.map((finding, idx) => {
+            const hasWhy = whyCapableCategories.some(cat => finding.category.includes(cat.replace('Related Cases (Similarity Analysis)', 'Similarity')));
+            const isWhyActive = activeFindingIdx === idx;
+
+            return (
+              <div key={idx} className="bg-white p-3 rounded-lg border border-slate-100 shadow-sm">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-slate-800">{finding.category}</span>
+                  <div className="flex items-center gap-2">
+                    {hasWhy && (
+                      <button
+                        onClick={() => handleWhyClick(finding, idx)}
+                        className={cn(
+                          "text-[10px] font-bold px-2 py-0.5 rounded border transition-all",
+                          isWhyActive
+                            ? "bg-indigo-600 text-white border-indigo-600"
+                            : "bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100"
+                        )}
+                      >
+                        WHY?
+                      </button>
+                    )}
+                    <span className={cn(
+                      "text-[9px] font-bold px-1.5 py-0.5 rounded border",
+                      strengthColor(finding.strength)
+                    )}>
+                      {finding.strength.toUpperCase()}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">{finding.description}</p>
+                <div className="flex items-center gap-1 mt-1.5">
+                  <span className="text-[9px] text-slate-400">Sources:</span>
+                  {(finding.evidence_sources || []).map((src: string, i: number) => (
+                    <span key={i} className="text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">
+                      {src}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Inline Similar Cases */}
+                {finding.category.includes('Similarity') && finding.data?.similar_cases?.length > 0 && !isWhyActive && (
+                  <div className="mt-2 space-y-1">
+                    {finding.data.similar_cases.slice(0, 3).map((sc: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 text-[10px] bg-slate-50 p-2 rounded border border-slate-100">
+                        <span className="font-bold text-indigo-700">{sc.crime_no}</span>
+                        <span className={cn(
+                          "font-bold",
+                          sc.match_score >= 80 ? "text-red-600" : sc.match_score >= 50 ? "text-amber-600" : "text-emerald-600"
+                        )}>{sc.match_score}%</span>
+                        <span className="text-slate-500 truncate flex-1">{(sc.explanations || []).join('; ')}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Inline Risk Profiles */}
+                {finding.category.includes('Risk') && finding.data?.profiles?.length > 0 && !isWhyActive && (
+                  <div className="mt-2 space-y-1">
+                    {finding.data.profiles.slice(0, 5).map((p: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 text-[10px] bg-slate-50 p-2 rounded border border-slate-100">
+                        <span className="font-bold text-slate-800">Accused #{p.accused_id}</span>
+                        <span className={cn(
+                          "font-bold",
+                          p.score >= 80 ? "text-red-600" : p.score >= 50 ? "text-amber-600" : "text-emerald-600"
+                        )}>{p.score}/100</span>
+                        {p.repeat_offender && <span className="text-red-500 font-bold">REPEAT</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* WHY? Evidence Graph Expansion */}
+                {isWhyActive && (
+                  <div className="mt-3 border-t border-indigo-100 pt-3">
+                    {isLoadingGraph && (
+                      <div className="flex items-center justify-center py-6">
+                        <Loader2 className="w-5 h-5 text-indigo-500 animate-spin mr-2" />
+                        <span className="text-xs text-slate-500">Building evidence graph...</span>
+                      </div>
+                    )}
+                    {graphError && (
+                      <div className="text-xs text-amber-600 bg-amber-50 p-2 rounded border border-amber-200">
+                        {graphError}
+                      </div>
+                    )}
+                    {evidenceGraph && !isLoadingGraph && (
+                      <div className="space-y-3">
+                        {evidenceGraph.nodes.length > 0 ? (
+                          <>
+                            <div className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider">
+                              Evidence Graph ({evidenceGraph.nodes.length} entities, {evidenceGraph.edges.length} relationships)
+                            </div>
+                            <EvidenceGraph
+                              nodes={evidenceGraph.nodes}
+                              edges={evidenceGraph.edges}
+                              compact={true}
+                              selectedEdgeId={selectedEdge?.id}
+                              onEdgeClick={(edge) => { setSelectedEdge(edge); setSelectedNode(null); }}
+                              onNodeClick={(node) => { setSelectedNode(node); setSelectedEdge(null); }}
+                            />
+                            <EvidencePanel
+                              edge={selectedEdge}
+                              node={selectedNode}
+                              allNodes={evidenceGraph.nodes}
+                              allEdges={evidenceGraph.edges}
+                              onClose={() => { setSelectedEdge(null); setSelectedNode(null); }}
+                              onViewRecord={handleViewRecord}
+                            />
+                          </>
+                        ) : (
+                          <div className="text-xs text-slate-500 text-center py-4">
+                            No detailed evidence graph available for this finding type.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {errors && errors.data?.errors?.length > 0 && (
+            <div className="p-2 bg-amber-50 rounded-lg border border-amber-200">
+              <div className="text-[10px] font-bold text-amber-700 mb-1">Engine Errors</div>
+              {errors.data.errors.map((err: any, i: number) => (
+                <div key={i} className="text-[10px] text-amber-600">• {err.engine}: {err.message}</div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

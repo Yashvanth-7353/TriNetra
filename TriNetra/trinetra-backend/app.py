@@ -27,7 +27,16 @@ case_explorer_engine = CaseExplorerEngine()
 from engines.network_engine import NetworkEngine
 network_engine = NetworkEngine()
 from engines.sarvam_engine import sarvam_engine
+from engines.investigation import InvestigationEngine
+from engines.evidence_graph import EvidenceGraphBuilder
+from engines.forecasting import CrimeForecastingEngine
+from engines.predictive_hotspots import PredictiveHotspotEngine
 from engines.auth import authenticate_employee, create_jwt_token, verify_jwt_token, get_employee_profile
+
+investigation_engine = InvestigationEngine()
+evidence_graph_builder = EvidenceGraphBuilder()
+forecasting_engine = CrimeForecastingEngine()
+predictive_hotspot_engine = PredictiveHotspotEngine()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -52,11 +61,30 @@ class LoginRequest(BaseModel):
 class ChatRequest(BaseModel):
     query: str
     session_token: str = "local_node_dev_session"
-    # These are fallbacks; JWT token overrides them when present
-    role: str = "Investigator" 
-    employee_id: int = 101
-    unit_id: int = 5
-    district_id: int = 2
+
+
+def _extract_auth_context(authorization: Optional[str]) -> dict:
+    """Extracts authenticated user context from JWT. Raises 401 if invalid."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing.")
+    try:
+        payload = verify_jwt_token(authorization)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+    profile = get_employee_profile(payload["employee_id"])
+    if "error" in profile:
+        raise HTTPException(status_code=401, detail="Employee profile not found.")
+    return {
+        "employee_id": profile["employee_id"],
+        "role": profile["role"],
+        "unit_id": profile.get("unit_id"),
+        "district_id": profile.get("district_id"),
+        "name": profile.get("name", "Unknown"),
+        "district_name": profile.get("district_name", ""),
+        "unit_name": profile.get("unit_name", ""),
+    }
 
 
 @app.post("/api/login")
@@ -250,9 +278,8 @@ async def get_analytics_alerts(
     """Returns prevention alerts computed for the logged in employee jurisdiction only."""
     if authorization:
         try:
-            payload = verify_jwt_token(authorization)
-            if "district_id" in payload:
-                district_id = payload["district_id"]
+            auth_ctx = _extract_auth_context(authorization)
+            district_id = auth_ctx["district_id"]
         except Exception:
             pass
             
@@ -397,8 +424,50 @@ def access_context_memory(session_id: str) -> list:
         session_profile["last_active"] = current_time
         return session_profile["turns"]
     
-    session_store[session_id] = {"turns": [], "last_active": current_time}
+    session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
     return session_store[session_id]["turns"]
+
+def get_investigation_context(session_id: str) -> dict:
+    """Returns the last investigation result for multi-turn context."""
+    current_time = time.time()
+    session_profile = session_store.get(session_id)
+    if session_profile and (current_time - session_profile["last_active"] < SESSION_TTL_SECONDS):
+        return session_profile.get("investigation")
+    return None
+
+def set_investigation_context(session_id: str, investigation_result: dict):
+    """Stores the investigation result for multi-turn follow-up queries."""
+    current_time = time.time()
+    if session_id not in session_store:
+        session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
+    session_store[session_id]["investigation"] = {
+        "plan": investigation_result.get("investigation", {}).get("plan", {}),
+        "discovered_cases": [],
+        "discovered_accused": [],
+        "timestamp": current_time,
+    }
+    # Extract discovered entities from findings
+    for finding in investigation_result.get("investigation", {}).get("findings", []):
+        data = finding.get("data", {})
+        for case in data.get("cases", []):
+            cid = case.get("casemasterid") or case.get("CaseMasterID")
+            if cid:
+                session_store[session_id]["investigation"]["discovered_cases"].append(int(cid))
+        for match in data.get("similar_cases", []):
+            cid = match.get("case_id")
+            if cid:
+                session_store[session_id]["investigation"]["discovered_cases"].append(int(cid))
+        for profile in data.get("profiles", []):
+            aid = profile.get("accused_id")
+            if aid:
+                session_store[session_id]["investigation"]["discovered_accused"].append(int(aid))
+        for node in data.get("nodes", []):
+            aid = node.get("accused_id")
+            if aid:
+                session_store[session_id]["investigation"]["discovered_accused"].append(int(aid))
+    # Deduplicate
+    session_store[session_id]["investigation"]["discovered_cases"] = list(set(session_store[session_id]["investigation"]["discovered_cases"]))
+    session_store[session_id]["investigation"]["discovered_accused"] = list(set(session_store[session_id]["investigation"]["discovered_accused"]))
 
 def synthesize_structural_response(user_query: str, records: list) -> str:
     """Synthesizes database record blocks into highly pristine natural intelligence summaries."""
@@ -428,16 +497,23 @@ def synthesize_structural_response(user_query: str, records: list) -> str:
     )
     return response.choices[0].message.content.strip()
 
+
 @app.post("/api/chat")
-async def handle_chat(request: ChatRequest):
+async def handle_chat(request: ChatRequest, authorization: Optional[str] = Header(None)):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Invalid Request Payload.")
 
-    # 1. Generate the security profile BEFORE anything else
+    # 1. Extract authenticated user context from JWT (never trust client-supplied role/district)
+    auth_ctx = _extract_auth_context(authorization)
+    user_role = auth_ctx["role"]
+    user_employee_id = auth_ctx["employee_id"]
+    user_unit_id = auth_ctx["unit_id"]
+    user_district_id = auth_ctx["district_id"]
+
     rbac_sql_filter = security_context.build_rbac_filter(
-        role=request.role, 
-        employee_district_id=request.district_id, 
-        employee_unit_id=request.unit_id
+        role=user_role,
+        employee_district_id=user_district_id,
+        employee_unit_id=user_unit_id
     )
 
     try:
@@ -488,7 +564,7 @@ async def handle_chat(request: ChatRequest):
                     answer_text = synthesize_structural_response(standalone_q, rows_payload)
                     extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
                     citations_array = [str(c) for c in extracted_citations if c][:5]
-                    execution_detail = f"RBAC applied ({request.role}). Executed Query."
+                    execution_detail = f"RBAC applied ({user_role}). Executed Query."
 
         elif target_engine == "narrative_rag":
             # For Milestone 2/3, we pass standard RAG. 
@@ -580,10 +656,10 @@ async def handle_chat(request: ChatRequest):
             answer_text = "Routed to Analytics endpoint (Milestone 4)."
             execution_detail = "Routing placeholder."
 
-        # MANDATORY: Log every interaction to the Audit Table
+        # MANDATORY: Log every interaction to the Audit Table (using authenticated identity)
         security_context.log_audit(
-            employee_id=request.employee_id,
-            role=request.role,
+            employee_id=user_employee_id,
+            role=user_role,
             raw_query=request.query,
             engine=target_engine,
             resolved_sql=resolved_query_log,
@@ -602,7 +678,7 @@ async def handle_chat(request: ChatRequest):
             "analytics_data": analytics_payload, # ADD THIS LINE
             "reasoning_trace": {
                 "execution_steps": [
-                    {"step": 1, "action": f"Security Check ({request.role})", "detail": f"Filter applied: {rbac_sql_filter}"},
+                    {"step": 1, "action": f"Security Check ({user_role})", "detail": f"Filter applied: {rbac_sql_filter}"},
                     {"step": 2, "action": "Intent Target", "detail": intent_profile["reasoning"]},
                     {"step": 3, "action": "Execution", "detail": execution_detail}
                 ]
@@ -610,6 +686,219 @@ async def handle_chat(request: ChatRequest):
         }
     except Exception as server_error:
         raise HTTPException(status_code=500, detail=str(server_error))
+
+# ──────────────────────────────────────────────
+#  Investigation Planner Endpoint
+# ──────────────────────────────────────────────
+
+class InvestigateRequest(BaseModel):
+    query: str
+    session_token: str = "local_node_dev_session"
+
+@app.post("/api/investigate")
+async def handle_investigate(request: InvestigateRequest, authorization: Optional[str] = Header(None)):
+    """
+    Multi-engine investigation planner.
+    Generates a structured plan, executes multiple engines, fuses evidence,
+    and returns an explainable investigation result.
+    """
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="Invalid Request Payload.")
+
+    # 1. Extract authenticated user context from JWT
+    auth_ctx = _extract_auth_context(authorization)
+    user_role = auth_ctx["role"]
+    user_employee_id = auth_ctx["employee_id"]
+    user_unit_id = auth_ctx["unit_id"]
+    user_district_id = auth_ctx["district_id"]
+
+    rbac_sql_filter = security_context.build_rbac_filter(
+        role=user_role,
+        employee_district_id=user_district_id,
+        employee_unit_id=user_unit_id
+    )
+
+    try:
+        # 2. Get conversation context for multi-turn investigations
+        conversation_history = access_context_memory(request.session_token)
+        investigation_context = get_investigation_context(request.session_token)
+
+        # Build extended history including investigation context
+        extended_history = list(conversation_history)
+        if investigation_context:
+            # Add investigation context to history so planner can reference previous results
+            prev_plan = investigation_context.get("plan", {})
+            discovered_cases = investigation_context.get("discovered_cases", [])
+            discovered_accused = investigation_context.get("discovered_accused", [])
+            if discovered_cases or discovered_accused:
+                context_note = "Previous investigation discovered: "
+                if discovered_cases:
+                    context_note += f"Cases {discovered_cases[:10]}"
+                if discovered_accused:
+                    context_note += f", Accused IDs {discovered_accused[:10]}"
+                extended_history.append({"role": "system", "text": context_note})
+
+        # 3. Run investigation pipeline
+        result = investigation_engine.run_investigation(
+            request_text=request.query,
+            rbac_filter=rbac_sql_filter,
+            conversation_history=extended_history,
+            nl2sql_engine=nl2sql_engine,
+            rag_engine=rag_engine,
+            graph_engine=graph_engine,
+            network_engine=network_engine,
+            pattern_engine=pattern_engine,
+            analytics_engine=analytics_engine,
+            case_explorer_engine=case_explorer_engine,
+        )
+
+        # 4. Store investigation context for multi-turn follow-up
+        set_investigation_context(request.session_token, result)
+
+        # 5. Log to conversation history and audit
+        active_memory = access_context_memory(request.session_token)
+        active_memory.append({"role": "user", "text": request.query})
+        active_memory.append({"role": "assistant", "text": result.get("answer", "")})
+
+        engines_used = result.get("investigation", {}).get("summary_stats", {}).get("engines_executed", 0)
+        security_context.log_audit(
+            employee_id=user_employee_id,
+            role=user_role,
+            raw_query=request.query,
+            engine="investigation",
+            resolved_sql=f"MULTI_ENGINE: {engines_used} engines",
+            row_count=len(result.get("citations", []))
+        )
+
+        return result
+
+    except Exception as server_error:
+        raise HTTPException(status_code=500, detail=str(server_error))
+
+
+# ──────────────────────────────────────────────
+#  Evidence Graph Endpoint
+# ──────────────────────────────────────────────
+
+class EvidenceGraphRequest(BaseModel):
+    finding: dict
+
+@app.post("/api/evidence/graph")
+async def get_evidence_graph(request: EvidenceGraphRequest, authorization: Optional[str] = Header(None)):
+    """
+    Builds a structured evidence graph from a finding.
+    Returns nodes (real entities) and edges (real relationships with provenance).
+    """
+    # Verify authentication
+    _extract_auth_context(authorization)
+
+    finding = request.finding
+    if not finding:
+        raise HTTPException(status_code=400, detail="No finding data provided.")
+
+    try:
+        result = evidence_graph_builder.build_from_finding(finding)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Evidence graph generation failed: {str(e)}")
+
+
+# ──────────────────────────────────────────────
+#  Crime Forecasting Endpoints
+# ──────────────────────────────────────────────
+
+@app.get("/api/forecast")
+async def get_forecast(
+    category_id: Optional[int] = Query(None),
+    district_id: Optional[int] = Query(None),
+    horizon: int = Query(3, ge=1, le=6),
+    authorization: Optional[str] = Header(None),
+):
+    """Generates a monthly crime forecast using Holt-Winters exponential smoothing."""
+    auth_ctx = _extract_auth_context(authorization)
+    rbac_filter = security_context.build_rbac_filter(
+        role=auth_ctx["role"],
+        employee_district_id=auth_ctx["district_id"],
+        employee_unit_id=auth_ctx["unit_id"]
+    )
+    # Override district_id with authorized scope if non-admin
+    if auth_ctx["role"] in ["Investigator", "Supervisor"]:
+        district_id = auth_ctx["district_id"]
+
+    result = forecasting_engine.forecast_category(
+        category_id=category_id,
+        district_id=district_id,
+        horizon=horizon,
+        rbac_filter=rbac_filter,
+    )
+    security_context.log_audit(
+        employee_id=auth_ctx["employee_id"],
+        role=auth_ctx["role"],
+        raw_query=f"Forecast cat={category_id} dist={district_id} hor={horizon}",
+        engine="forecasting",
+        resolved_sql="STATISTICAL_MODEL",
+        row_count=0
+    )
+    return result
+
+
+@app.get("/api/forecast/summary")
+async def get_forecast_summary(
+    district_id: Optional[int] = Query(None),
+    horizon: int = Query(3, ge=1, le=6),
+    authorization: Optional[str] = Header(None),
+):
+    """Returns forecast summaries for all crime categories."""
+    auth_ctx = _extract_auth_context(authorization)
+    rbac_filter = security_context.build_rbac_filter(
+        role=auth_ctx["role"],
+        employee_district_id=auth_ctx["district_id"],
+        employee_unit_id=auth_ctx["unit_id"]
+    )
+    if auth_ctx["role"] in ["Investigator", "Supervisor"]:
+        district_id = auth_ctx["district_id"]
+
+    result = forecasting_engine.forecast_all_categories(
+        district_id=district_id,
+        horizon=horizon,
+        rbac_filter=rbac_filter,
+    )
+    return result
+
+
+@app.get("/api/forecast/hotspots")
+async def get_predictive_hotspots(
+    district_id: Optional[int] = Query(None),
+    category_id: Optional[int] = Query(None),
+    horizon: int = Query(3, ge=1, le=6),
+    authorization: Optional[str] = Header(None),
+):
+    """Classifies geographic areas as historical, emerging, or predicted hotspots."""
+    auth_ctx = _extract_auth_context(authorization)
+    rbac_filter = security_context.build_rbac_filter(
+        role=auth_ctx["role"],
+        employee_district_id=auth_ctx["district_id"],
+        employee_unit_id=auth_ctx["unit_id"]
+    )
+    if auth_ctx["role"] in ["Investigator", "Supervisor"]:
+        district_id = auth_ctx["district_id"]
+
+    result = predictive_hotspot_engine.classify_hotspots(
+        district_id=district_id,
+        category_id=category_id,
+        horizon=horizon,
+        rbac_filter=rbac_filter,
+    )
+    security_context.log_audit(
+        employee_id=auth_ctx["employee_id"],
+        role=auth_ctx["role"],
+        raw_query=f"Predictive hotspots cat={category_id} dist={district_id}",
+        engine="predictive_hotspots",
+        resolved_sql="GEOGRAPHIC_CLASSIFICATION",
+        row_count=0
+    )
+    return result
+
 
 class ExportRequest(BaseModel):
     messages: list
@@ -786,6 +1075,31 @@ async def export_chat(request: ExportRequest, authorization: Optional[str] = Hea
                             </table>
                         </div>
                     """
+
+            # Investigation Findings
+            if msg.get("investigation") and msg["investigation"].get("findings"):
+                inv = msg["investigation"]
+                stats = inv.get("summary_stats", {})
+                html_content += f"""
+                        <div class="mt-4 bg-indigo-50 p-4 rounded-lg border border-indigo-200 text-xs">
+                            <h4 class="font-bold text-indigo-800 mb-2">🔍 Investigation Results</h4>
+                            <div class="text-[10px] text-indigo-600 mb-2">
+                                Engines: {stats.get('engines_succeeded', 0)}/{stats.get('engines_executed', 0)} succeeded | Evidence strength: {stats.get('overall_strength', 'unknown').upper()}
+                            </div>
+                """
+                for finding in inv["findings"]:
+                    if finding.get("category") in ("Investigation Overview", "Engine Failures"):
+                        continue
+                    html_content += f"""
+                            <div class="bg-white p-3 rounded border border-indigo-100 mb-2">
+                                <div class="flex justify-between items-center mb-1">
+                                    <span class="font-bold text-slate-800">{finding.get('category', '')}</span>
+                                    <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{finding.get('strength', '').upper()}</span>
+                                </div>
+                                <p class="text-slate-600">{finding.get('description', '')}</p>
+                            </div>
+                    """
+                html_content += "</div>"
 
             # Citations
             if msg.get("citations"):

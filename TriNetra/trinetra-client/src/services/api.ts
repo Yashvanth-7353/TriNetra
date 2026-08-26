@@ -32,10 +32,6 @@ function authHeaders(): Record<string, string> {
 export interface ChatRequest {
   query: string;
   session_token?: string;
-  role?: string;
-  employee_id?: number;
-  unit_id?: number;
-  district_id?: number;
 }
 
 export interface ReasoningStep {
@@ -150,7 +146,7 @@ export async function fetchProfile(): Promise<any> {
 
 /**
  * Core function: send any query to /api/chat.
- * Automatically attaches user context from JWT profile.
+ * Authentication is via JWT header only — role/district derived server-side.
  */
 export async function sendChatQuery(
   query: string,
@@ -161,10 +157,6 @@ export async function sendChatQuery(
   const body: ChatRequest = {
     query,
     session_token: `session_${profile?.employee_id || 'anon'}`,
-    role: profile?.role || 'Investigator',
-    employee_id: profile?.employee_id || 101,
-    unit_id: profile?.unit_id || 5,
-    district_id: profile?.district_id || 2,
     ...overrides,
   };
 
@@ -869,6 +861,327 @@ export async function fetchSimilarCases(caseId: number, k: number = 10): Promise
     headers: authHeaders(),
   });
   if (!response.ok) throw new Error('Failed to load similar cases');
+  return response.json();
+}
+
+// ── Investigation Planner API ──
+
+export interface InvestigationFinding {
+  category: string;
+  description: string;
+  evidence_sources: string[];
+  data: any;
+  strength: 'strong' | 'moderate' | 'limited' | 'none';
+}
+
+export interface InvestigationPlan {
+  investigation_type: string;
+  objectives: string[];
+  engines: string[];
+  filters: Record<string, any>;
+  entities: { case_ids: number[]; accused_ids: number[] };
+  summary: string;
+}
+
+export interface InvestigationResponse {
+  status: string;
+  intent_detected: string;
+  answer: string;
+  citations: string[];
+  graph_data: GraphData | null;
+  analytics_data: AnalyticsPayload | null;
+  investigation: {
+    plan: InvestigationPlan;
+    findings: InvestigationFinding[];
+    summary_stats: {
+      total_findings: number;
+      engines_executed: number;
+      engines_succeeded: number;
+      engines_failed: number;
+      overall_strength: string;
+    };
+    evidence_graph: any[];
+  };
+  reasoning_trace: {
+    execution_steps: ReasoningStep[];
+  };
+}
+
+/**
+ * Sends an investigation request to the multi-engine investigation planner.
+ * The planner generates a structured plan, executes multiple engines,
+ * fuses evidence, and returns an explainable investigation result.
+ */
+export async function sendInvestigationQuery(
+  query: string,
+  sessionToken?: string
+): Promise<InvestigationResponse> {
+  const profile = getStoredProfile();
+
+  const body = {
+    query,
+    session_token: sessionToken || `session_${profile?.employee_id || 'anon'}`,
+  };
+
+  const response = await fetch(`${API_BASE}/api/investigate`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Investigation failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Detects whether a query is an investigation request (multi-engine)
+ * versus a simple query (single engine).
+ * This detection is done client-side for UX routing; the backend
+ * always validates and executes accordingly.
+ */
+export function isInvestigationRequest(query: string): boolean {
+  const lower = query.toLowerCase();
+  const investigationPatterns = [
+    /\binvestigat/i,
+    /\banaly[sz]e.*case/i,
+    /\bfind.*pattern/i,
+    /\bfind.*repeat.*offend/i,
+    /\bfind.*connect/i,
+    /\bfind.*related/i,
+    /\bare.*these.*connect/i,
+    /\bhow.*these.*case/i,
+    /\bcriminal.*network/i,
+    /\bconnected.*offend/i,
+    /\bconnected.*accus/i,
+    /\bmap.*network/i,
+    /\bmap.*syndicat/i,
+    /\bcrime.*ring/i,
+    /\bcriminal.*ring/i,
+    /\bwho.*connected/i,
+    /\btrace.*money/i,
+    /\bfinancial.*trail/i,
+    /\bmoney.*trail/i,
+    /\b关联/i,
+  ];
+  return investigationPatterns.some(p => p.test(lower));
+}
+
+// ── Evidence Graph API ──
+
+export interface EvidenceNode {
+  id: string;
+  type: 'case' | 'person' | 'mo_tag' | 'pattern' | 'risk_score' | 'account' | 'location';
+  label: string;
+  source: { table: string; record_id: any };
+  is_primary: boolean;
+  metadata?: Record<string, any>;
+}
+
+export interface EvidenceSignal {
+  signal: string;
+  label: string;
+  description: string;
+  value: string;
+  source_records: { table: string; record_id: any; field?: string }[];
+}
+
+export interface EvidenceEdge {
+  id: string;
+  source: string;
+  target: string;
+  relationship: string;
+  relationship_label: string;
+  strength: 'strong' | 'moderate' | 'limited';
+  source_engine: string;
+  evidence: EvidenceSignal[];
+}
+
+export interface EvidenceGraphResponse {
+  status: string;
+  nodes: EvidenceNode[];
+  edges: EvidenceEdge[];
+  finding_summary: string;
+  evidence_strength: string;
+  sources: string[];
+}
+
+export async function sendEvidenceGraph(finding: any): Promise<EvidenceGraphResponse> {
+  const response = await fetch(`${API_BASE}/api/evidence/graph`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ finding }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Evidence graph failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+// ── Crime Forecasting API ──
+
+export interface ForecastSignal {
+  signal: string;
+  label?: string;
+  description: string;
+  value?: number | string | Record<string, string>;
+}
+
+export interface ForecastPoint {
+  month: string;
+  forecast?: number;
+  lower?: number;
+  upper?: number;
+  count?: number;
+  type: 'observed' | 'forecast' | 'baseline';
+}
+
+export interface ForecastEvaluation {
+  model_mae?: number;
+  model_rmse?: number;
+  model_mape?: number;
+  baseline_mae?: number;
+  baseline_rmse?: number;
+  baseline_mape?: number;
+  improvement_mae?: number;
+  train_months?: number;
+  test_months?: number;
+}
+
+export interface ForecastResponse {
+  status: string;
+  category?: string;
+  category_id?: number;
+  district_id?: number;
+  horizon_months?: number;
+  model?: string;
+  model_params?: Record<string, number>;
+  historical?: ForecastPoint[];
+  forecast?: ForecastPoint[];
+  baseline?: ForecastPoint[];
+  evaluation?: ForecastEvaluation;
+  signals?: ForecastSignal[];
+  data_sufficiency?: {
+    total_months: number;
+    sufficient: boolean;
+    min_required: number;
+    note: string;
+  };
+  limitations?: string[];
+  reason?: string;
+}
+
+export interface ForecastSummaryCategory {
+  category_id: number;
+  category: string;
+  current_monthly_avg: number;
+  forecast_avg: number;
+  direction: 'increasing' | 'decreasing' | 'stable';
+  model_mape: number | null;
+}
+
+export interface ForecastSummaryResponse {
+  status: string;
+  categories: ForecastSummaryCategory[];
+  horizon_months: number;
+}
+
+export interface PredictiveHotspot {
+  district_id: number;
+  district_name: string;
+  hotspot_type: 'predicted' | 'emerging' | 'historical' | 'stable';
+  score: number;
+  total_cases: number;
+  avg_monthly: number;
+  recent_3mo_avg: number;
+  baseline_avg: number;
+  forecast_avg: number;
+  emerging_ratio: number;
+  predicted_ratio: number;
+  avg_lat: number | null;
+  avg_lng: number | null;
+  sparkline: { month: string; count: number }[];
+  signals: { signal: string; description: string }[];
+}
+
+export interface PredictiveHotspotsResponse {
+  status: string;
+  hotspots: PredictiveHotspot[];
+  summary: {
+    total_areas: number;
+    by_type: Record<string, number>;
+    horizon_months: number;
+  };
+  methodology: Record<string, string>;
+}
+
+export async function fetchForecast(
+  params: {
+    category_id?: number;
+    district_id?: number;
+    horizon?: number;
+  } = {}
+): Promise<ForecastResponse> {
+  const queryParts: string[] = [];
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.horizon) queryParts.push(`horizon=${params.horizon}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(`${API_BASE}/api/forecast${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Forecast failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchForecastSummary(
+  params: { district_id?: number; horizon?: number } = {}
+): Promise<ForecastSummaryResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.horizon) queryParts.push(`horizon=${params.horizon}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(`${API_BASE}/api/forecast/summary${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Forecast summary failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchPredictiveHotspots(
+  params: {
+    district_id?: number;
+    category_id?: number;
+    horizon?: number;
+  } = {}
+): Promise<PredictiveHotspotsResponse> {
+  const queryParts: string[] = [];
+  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
+  if (params.category_id) queryParts.push(`category_id=${params.category_id}`);
+  if (params.horizon) queryParts.push(`horizon=${params.horizon}`);
+  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(`${API_BASE}/api/forecast/hotspots${qs}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Predictive hotspots failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
   return response.json();
 }
 

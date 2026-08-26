@@ -14,7 +14,8 @@ import {
   Layers,
   Server,
   Menu,
-  X
+  X,
+  Radar
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../context/AuthContext';
@@ -28,6 +29,7 @@ const navItems = [
   { path: '/pattern-analytics', label: 'Pattern Analytics', icon: Layers },
   { path: '/offenders', label: 'Offender Profiles', icon: UserX },
   { path: '/alerts', label: 'Prevention Alerts', icon: BellRing },
+  { path: '/forecast', label: 'Crime Forecast', icon: Radar },
   { path: '/architecture', label: 'Architecture Diagram', icon: Server },
   { path: '/profile', label: 'My Profile', icon: User },
 ];

@@ -1,0 +1,958 @@
+"""
+Investigation Planner — Multi-Engine Evidence Fusion Pipeline
+
+Converts natural-language investigation requests into structured plans,
+executes the appropriate existing intelligence engines, fuses evidence
+with full provenance, and synthesizes an explainable investigation result.
+
+Architecture:
+    User Request
+        → InvestigationPlanner (LLM → structured plan)
+        → InvestigationOrchestrator (plan → engine calls)
+        → EvidenceFusion (engine results → fused evidence)
+        → ResponseBuilder (evidence → NL summary via LLM)
+
+All engine outputs are REAL database-backed results.
+The LLM is used ONLY for plan generation and final text synthesis.
+"""
+
+import os
+import json
+import time
+import re
+import psycopg2
+from groq import Groq
+from typing import Optional
+
+
+# ════════════════════════════════════════════════════════════════
+#  STEP 1: INVESTIGATION PLANNER
+# ════════════════════════════════════════════════════════════════
+
+class InvestigationPlanner:
+    """
+    Uses Groq LLM to convert a natural-language investigation request
+    into a strict structured plan. The plan determines which engines
+    to run and with what parameters.
+    """
+
+    VALID_ENGINES = [
+        "case_query",       # SQL-based case retrieval
+        "case_similarity",  # pgvector + MO similarity
+        "criminal_network", # NetworkX graph traversal
+        "risk_profile",     # Offender risk scoring
+        "pattern_detection",# MO-based pattern clustering
+        "narrative_rag",    # Vector semantic search
+        "trend_analysis",   # Temporal crime trends
+    ]
+
+    def __init__(self):
+        self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
+
+    def create_plan(self, request_text: str, conversation_history: list = None) -> dict:
+        """
+        Generates a structured investigation plan from natural language.
+
+        Returns a dict with:
+            investigation_type: str
+            objectives: list[str]
+            engines: list[str]  (subset of VALID_ENGINES)
+            filters: dict
+            entities: dict (case_ids, accused_ids, etc.)
+            summary: str (brief description of what the plan will do)
+        """
+        if not self.groq_client:
+            return self._fallback_plan(request_text)
+
+        history_context = ""
+        if conversation_history:
+            recent = conversation_history[-6:]
+            history_context = "\n".join([f"{h['role']}: {h['text']}" for h in recent])
+
+        prompt = f"""You are an investigation planning agent for a law enforcement AI system.
+
+Given an investigator's natural-language request, produce a strict JSON plan that determines
+which intelligence engines to execute. You have access to these engines:
+
+ENGINES AVAILABLE:
+1. "case_query" — SQL-based search for FIRs. Use when: the investigator wants to find cases by district, date range, crime type, status, or keyword. Extracts filter params.
+2. "case_similarity" — Finds cases similar to a specific CaseMasterID. Use when: the investigator mentions a specific case and wants to find related/similar cases.
+3. "criminal_network" — Graph traversal starting from an AccusedMasterID. Use when: the investigator wants to see connections between criminals, co-accused, money trails, syndicates.
+4. "risk_profile" — Fetches precomputed risk score for a specific AccusedMasterID. Use when: the investigator wants to assess a specific offender's danger level.
+5. "pattern_detection" — Finds emerging MO-based crime clusters. Use when: the investigator wants to see if there are suspicious patterns or clusters of similar crimes.
+6. "narrative_rag" — Semantic search over FIR narratives. Use when: the investigator describes a scenario or method and wants to find matching cases by narrative similarity.
+7. "trend_analysis" — Temporal aggregation of cases. Use when: the investigator wants to see how crime volume changes over time.
+
+FILTERS that can be extracted:
+- district_name: string (e.g. "Bengaluru Urban")
+- district_id: integer
+- crime_category: string (e.g. "Theft", "Cyber Crime")
+- time_window: "3m" | "6m" | "12m" | null (for "recent", "last 3 months", etc.)
+- search_keyword: string (for BriefFacts text search)
+
+ENTITIES that can be extracted:
+- case_ids: list of CaseMasterID integers
+- accused_ids: list of AccusedMasterID integers
+
+{f'''CONVERSATION HISTORY (for resolving references like "these cases", "those offenders"):
+{history_context}''' if history_context else ""}
+
+INVESTIGATOR REQUEST:
+"{request_text}"
+
+Respond ONLY with a valid JSON object matching this exact schema:
+{{
+  "investigation_type": "crime_pattern_investigation" | "specific_case_analysis" | "offender_network_mapping" | "narrative_search" | "trend_investigation",
+  "objectives": ["brief_english_description_of_each_step"],
+  "engines": ["engine_name", ...],
+  "filters": {{
+    "district_name": "string or null",
+    "district_id": integer or null,
+    "crime_category": "string or null",
+    "time_window": "string or null",
+    "search_keyword": "string or null"
+  }},
+  "entities": {{
+    "case_ids": [integers],
+    "accused_ids": [integers]
+  }},
+  "summary": "One sentence describing what this investigation will do."
+}}
+
+RULES:
+- Always include at least one engine.
+- If the request mentions a specific case (CaseMasterID or CrimeNo), include "case_similarity".
+- If the request mentions a specific person/accused, include "criminal_network" and/or "risk_profile".
+- If the request asks about patterns, trends, or clusters, include "pattern_detection" or "trend_analysis".
+- If the request is about finding cases matching a description, include "case_query" or "narrative_rag".
+- For follow-up questions that reference previous results, use the conversation history to resolve references.
+- Do NOT include engines that have no data to work with.
+- Extract real district names, case IDs, and accused IDs from the text when present.
+"""
+
+        try:
+            response = self.groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="openai/gpt-oss-120b",
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                seed=42
+            )
+            plan = json.loads(response.choices[0].message.content)
+
+            # Validate engines
+            plan["engines"] = [e for e in plan.get("engines", []) if e in self.VALID_ENGINES]
+            if not plan["engines"]:
+                plan["engines"] = ["case_query"]
+
+            # Ensure required keys
+            plan.setdefault("investigation_type", "crime_pattern_investigation")
+            plan.setdefault("objectives", [])
+            plan.setdefault("filters", {})
+            plan.setdefault("entities", {"case_ids": [], "accused_ids": []})
+            plan.setdefault("summary", "Investigation plan generated.")
+
+            # Sanitize filters
+            for key in ["district_id"]:
+                if key in plan["filters"] and plan["filters"][key] is not None:
+                    try:
+                        plan["filters"][key] = int(plan["filters"][key])
+                    except (ValueError, TypeError):
+                        plan["filters"][key] = None
+
+            for key in ["case_ids", "accused_ids"]:
+                if key in plan["entities"]:
+                    plan["entities"][key] = [int(x) for x in plan["entities"][key] if x]
+
+            return plan
+
+        except Exception as e:
+            return self._fallback_plan(request_text, error=str(e))
+
+    def _fallback_plan(self, request_text: str, error: str = None) -> dict:
+        """Deterministic fallback when LLM is unavailable."""
+        return {
+            "investigation_type": "crime_pattern_investigation",
+            "objectives": ["Search for cases matching the request"],
+            "engines": ["case_query"],
+            "filters": {"search_keyword": request_text[:200]},
+            "entities": {"case_ids": [], "accused_ids": []},
+            "summary": f"Fallback plan: text search for '{request_text[:80]}...'"
+        }
+
+
+# ════════════════════════════════════════════════════════════════
+#  STEP 2: INVESTIGATION ORCHESTRATOR
+# ════════════════════════════════════════════════════════════════
+
+class InvestigationOrchestrator:
+    """
+    Executes the investigation plan by calling existing engines.
+    Passes outputs between engines where dependencies exist.
+    Each engine call is independent — failure in one does not block others.
+    """
+
+    def __init__(self):
+        self.db_url = os.getenv("NEON_DATABASE_URL")
+
+    def execute_plan(self, plan: dict, rbac_filter: str,
+                     nl2sql_engine, rag_engine, graph_engine,
+                     network_engine, pattern_engine, analytics_engine,
+                     case_explorer_engine) -> list:
+        """
+        Executes each engine in the plan and collects evidence items.
+        Returns a list of evidence item dicts.
+        """
+        evidence_items = []
+        filters = plan.get("filters", {})
+        entities = plan.get("entities", {})
+        engines_to_run = plan.get("engines", [])
+
+        # Track discovered entities for chaining
+        discovered_cases = set(entities.get("case_ids", []))
+        discovered_accused = set(entities.get("accused_ids", []))
+
+        # Phase 1: Case query (feeds into subsequent engines)
+        if "case_query" in engines_to_run:
+            items = self._run_case_query(
+                filters, rbac_filter, case_explorer_engine, nl2sql_engine
+            )
+            evidence_items.extend(items)
+            # Extract discovered entities from case query results
+            for item in items:
+                for case in item.get("data", {}).get("cases", []):
+                    cid = case.get("casemasterid") or case.get("CaseMasterID")
+                    if cid:
+                        discovered_cases.add(int(cid))
+
+        # Phase 2: Narrative RAG (independent)
+        if "narrative_rag" in engines_to_run:
+            items = self._run_narrative_rag(filters, rag_engine)
+            evidence_items.extend(items)
+
+        # Phase 3: Pattern detection (independent)
+        if "pattern_detection" in engines_to_run:
+            items = self._run_pattern_detection(filters, pattern_engine)
+            evidence_items.extend(items)
+
+        # Phase 4: Trend analysis (independent)
+        if "trend_analysis" in engines_to_run:
+            items = self._run_trend_analysis(filters, rbac_filter, nl2sql_engine)
+            evidence_items.extend(items)
+
+        # Phase 5: Case similarity (depends on discovered_cases or explicit case_ids)
+        if "case_similarity" in engines_to_run:
+            similarity_targets = list(discovered_cases)[:5]  # Cap at 5 for performance
+            items = self._run_case_similarity(similarity_targets, pattern_engine)
+            evidence_items.extend(items)
+
+        # Phase 6: Network analysis (depends on discovered_accused)
+        # First, extract accused IDs from discovered cases
+        if "criminal_network" in engines_to_run:
+            if not discovered_accused and discovered_cases:
+                discovered_accused = self._extract_accused_from_cases(
+                    discovered_cases, rbac_filter
+                )
+            items = self._run_network_analysis(
+                list(discovered_accused)[:10], network_engine
+            )
+            evidence_items.extend(items)
+
+        # Phase 7: Risk profiles (depends on discovered_accused)
+        if "risk_profile" in engines_to_run:
+            if not discovered_accused and discovered_cases:
+                discovered_accused = self._extract_accused_from_cases(
+                    discovered_cases, rbac_filter
+                )
+            items = self._run_risk_profiles(
+                list(discovered_accused)[:20], analytics_engine
+            )
+            evidence_items.extend(items)
+
+        return evidence_items
+
+    def _run_case_query(self, filters: dict, rbac_filter: str,
+                        case_explorer_engine, nl2sql_engine) -> list:
+        """Execute SQL-based case search. Returns evidence items."""
+        items = []
+        try:
+            # Use case_explorer_engine for structured filter-based search
+            district_name = filters.get("district_name")
+            crime_category = filters.get("crime_category")
+            time_window = filters.get("time_window")
+            search_keyword = filters.get("search_keyword")
+
+            # Build case explorer params
+            params = {
+                "page": 1,
+                "page_size": 50,
+            }
+            if filters.get("district_id"):
+                params["district_id"] = filters["district_id"]
+
+            result = case_explorer_engine.search_cases(**params)
+
+            if "error" not in result and result.get("cases"):
+                cases = result["cases"]
+                items.append({
+                    "engine": "case_query",
+                    "type": "case_list",
+                    "data": {
+                        "cases": cases,
+                        "total_count": result.get("pagination", {}).get("total_count", 0),
+                    },
+                    "signal": f"Found {len(cases)} cases matching query criteria",
+                    "strength": "strong" if len(cases) >= 5 else "moderate" if len(cases) >= 2 else "limited",
+                })
+            else:
+                # Fallback: use NL2SQL for keyword search
+                if search_keyword:
+                    query_text = f"Search for cases involving '{search_keyword}'"
+                    if district_name:
+                        query_text += f" in {district_name}"
+                    generated_sql = nl2sql_engine.generate_sql(query_text, rbac_filter=rbac_filter)
+                    exec_result = nl2sql_engine.validate_and_execute(generated_sql, query_text)
+                    if "error" not in exec_result and exec_result.get("rows"):
+                        items.append({
+                            "engine": "case_query",
+                            "type": "case_list",
+                            "data": {"cases": exec_result["rows"]},
+                            "signal": f"Found {len(exec_result['rows'])} cases via NL2SQL search",
+                            "strength": "moderate",
+                        })
+
+        except Exception as e:
+            items.append({
+                "engine": "case_query",
+                "type": "error",
+                "data": {"error": str(e)},
+                "signal": f"Case query failed: {str(e)[:100]}",
+                "strength": "none",
+            })
+        return items
+
+    def _run_narrative_rag(self, filters: dict, rag_engine) -> list:
+        """Execute RAG semantic search. Returns evidence items."""
+        items = []
+        try:
+            keyword = filters.get("search_keyword")
+            if not keyword:
+                return items
+
+            result = rag_engine.search_and_summarize(keyword)
+            if "error" not in result and result.get("citations"):
+                items.append({
+                    "engine": "narrative_rag",
+                    "type": "narrative_matches",
+                    "data": {
+                        "answer": result.get("answer", ""),
+                        "citations": result.get("citations", []),
+                    },
+                    "signal": f"RAG found {len(result['citations'])} narratively similar FIRs",
+                    "strength": "strong" if len(result["citations"]) >= 3 else "moderate",
+                })
+        except Exception as e:
+            items.append({
+                "engine": "narrative_rag",
+                "type": "error",
+                "data": {"error": str(e)},
+                "signal": f"RAG search failed: {str(e)[:100]}",
+                "strength": "none",
+            })
+        return items
+
+    def _run_pattern_detection(self, filters: dict, pattern_engine) -> list:
+        """Execute MO-based pattern detection. Returns evidence items."""
+        items = []
+        try:
+            result = pattern_engine.get_emerging_patterns()
+            if "error" not in result and result.get("patterns"):
+                patterns = result["patterns"]
+                # Filter by district if specified
+                district_name = filters.get("district_name")
+                if district_name:
+                    patterns = [p for p in patterns
+                                if district_name.lower() in
+                                " ".join([str(d) for d in p.get("districts", [])]).lower()
+                                or any(district_name.lower() in c.get("district", "").lower()
+                                       for c in p.get("cases", []))]
+
+                if patterns:
+                    items.append({
+                        "engine": "pattern_detection",
+                        "type": "patterns",
+                        "data": {"patterns": patterns},
+                        "signal": f"Detected {len(patterns)} emerging crime pattern clusters",
+                        "strength": "strong" if len(patterns) >= 3 else "moderate",
+                    })
+        except Exception as e:
+            items.append({
+                "engine": "pattern_detection",
+                "type": "error",
+                "data": {"error": str(e)},
+                "signal": f"Pattern detection failed: {str(e)[:100]}",
+                "strength": "none",
+            })
+        return items
+
+    def _run_trend_analysis(self, filters: dict, rbac_filter: str, nl2sql_engine) -> list:
+        """Execute temporal trend analysis via NL2SQL. Returns evidence items."""
+        items = []
+        try:
+            trend_instruction = " FORCE TREND FORMAT: Group by month. Select exactly two columns: 'month' (e.g. TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM')) and 'count'."
+            district_name = filters.get("district_name")
+            crime_category = filters.get("crime_category")
+
+            query_text = "Show the crime registration trend over the last 12 months"
+            if district_name:
+                query_text += f" in {district_name}"
+            if crime_category:
+                query_text += f" for {crime_category}"
+
+            generated_sql = nl2sql_engine.generate_sql(
+                query_text + trend_instruction, rbac_filter=rbac_filter
+            )
+            exec_result = nl2sql_engine.validate_and_execute(generated_sql, query_text)
+
+            if "error" not in exec_result and exec_result.get("rows"):
+                trend_data = []
+                for row in exec_result["rows"]:
+                    keys = list(row.keys())
+                    if len(keys) >= 2:
+                        trend_data.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
+
+                items.append({
+                    "engine": "trend_analysis",
+                    "type": "trend",
+                    "data": {"trend_data": trend_data},
+                    "signal": f"Analyzed {len(trend_data)} months of crime trend data",
+                    "strength": "strong" if len(trend_data) >= 6 else "moderate",
+                })
+        except Exception as e:
+            items.append({
+                "engine": "trend_analysis",
+                "type": "error",
+                "data": {"error": str(e)},
+                "signal": f"Trend analysis failed: {str(e)[:100]}",
+                "strength": "none",
+            })
+        return items
+
+    def _run_case_similarity(self, case_ids: list, pattern_engine) -> list:
+        """Run case similarity for each target case. Returns evidence items."""
+        items = []
+        for case_id in case_ids[:5]:
+            try:
+                result = pattern_engine.find_similar_cases(case_id=case_id, k=5)
+                if "error" not in result and result.get("similar_cases"):
+                    matches = result["similar_cases"]
+                    items.append({
+                        "engine": "case_similarity",
+                        "type": "similar_cases",
+                        "data": {
+                            "target_case_id": case_id,
+                            "similar_cases": matches,
+                        },
+                        "signal": f"Case #{case_id}: {len(matches)} similar cases found (top score: {matches[0]['match_score']:.0f}%)" if matches else f"Case #{case_id}: no similar cases found",
+                        "strength": "strong" if matches and matches[0]["match_score"] >= 60 else "moderate" if matches else "limited",
+                    })
+            except Exception as e:
+                items.append({
+                    "engine": "case_similarity",
+                    "type": "error",
+                    "data": {"target_case_id": case_id, "error": str(e)},
+                    "signal": f"Similarity search failed for Case #{case_id}: {str(e)[:80]}",
+                    "strength": "none",
+                })
+        return items
+
+    def _run_network_analysis(self, accused_ids: list, network_engine) -> list:
+        """Run network graph analysis for each accused. Returns evidence items."""
+        items = []
+        seen_nodes = set()
+        combined_nodes = []
+        combined_edges = []
+
+        for accused_id in accused_ids[:5]:
+            try:
+                result = network_engine.get_network(accused_id, max_hops=2)
+                if "error" not in result and result.get("nodes"):
+                    nodes = result["nodes"]
+                    edges = result["edges"]
+
+                    # Deduplicate nodes across accused
+                    for node in nodes:
+                        if node["id"] not in seen_nodes:
+                            seen_nodes.add(node["id"])
+                            combined_nodes.append(node)
+                    combined_edges.extend(edges)
+
+            except Exception as e:
+                items.append({
+                    "engine": "criminal_network",
+                    "type": "error",
+                    "data": {"accused_id": accused_id, "error": str(e)},
+                    "signal": f"Network analysis failed for Accused #{accused_id}: {str(e)[:80]}",
+                    "strength": "none",
+                })
+
+        if combined_nodes:
+            items.append({
+                "engine": "criminal_network",
+                "type": "network",
+                "data": {
+                    "nodes": combined_nodes,
+                    "edges": combined_edges,
+                    "root_node": f"A{accused_ids[0]}" if accused_ids else "",
+                    "stats": {
+                        "node_count": len(combined_nodes),
+                        "edge_count": len(combined_edges),
+                    }
+                },
+                "signal": f"Mapped network: {len(combined_nodes)} connected entities, {len(combined_edges)} relationships",
+                "strength": "strong" if len(combined_nodes) >= 5 else "moderate" if len(combined_nodes) >= 2 else "limited",
+            })
+        return items
+
+    def _run_risk_profiles(self, accused_ids: list, analytics_engine) -> list:
+        """Fetch risk profiles for accused individuals. Returns evidence items."""
+        items = []
+        profiles = []
+        for accused_id in accused_ids[:20]:
+            try:
+                result = analytics_engine.get_risk_profile(accused_id)
+                if "error" not in result:
+                    profiles.append({
+                        "accused_id": accused_id,
+                        "score": result["score"],
+                        "repeat_offender": result["repeat_offender"],
+                        "factors": result.get("factors", ""),
+                        "computed_date": str(result.get("computed_date", "")),
+                    })
+            except Exception:
+                pass
+
+        if profiles:
+            # Sort by risk score descending
+            profiles.sort(key=lambda x: x["score"], reverse=True)
+            high_risk = [p for p in profiles if p["score"] >= 70]
+            items.append({
+                "engine": "risk_profile",
+                "type": "risk_profiles",
+                "data": {"profiles": profiles},
+                "signal": f"Risk-assessed {len(profiles)} offenders; {len(high_risk)} high-risk (score ≥ 70)",
+                "strength": "strong" if high_risk else "moderate",
+            })
+        return items
+
+    def _extract_accused_from_cases(self, case_ids: set, rbac_filter: str) -> set:
+        """Extract AccusedMasterIDs from a set of CaseMasterIDs via direct SQL."""
+        accused_ids = set()
+        if not self.db_url or not case_ids:
+            return accused_ids
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            id_list = tuple(case_ids)
+            cur.execute(
+                "SELECT DISTINCT AccusedMasterID FROM Accused WHERE CaseMasterID IN %s",
+                (id_list,)
+            )
+            for row in cur.fetchall():
+                accused_ids.add(row[0])
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+        return accused_ids
+
+
+# ════════════════════════════════════════════════════════════════
+#  STEP 3: EVIDENCE FUSION
+# ════════════════════════════════════════════════════════════════
+
+class EvidenceFusion:
+    """
+    Combines evidence from multiple engines into unified findings.
+    Groups by entity (case, person), identifies overlapping signals,
+    and calculates evidence strength.
+    """
+
+    def fuse(self, evidence_items: list, investigation_type: str) -> dict:
+        """
+        Fuses evidence items into structured findings.
+
+        Returns:
+            findings: list of finding dicts
+            summary_stats: dict with counts
+            evidence_graph: list of all evidence items (for provenance)
+        """
+        findings = []
+
+        # Separate successful items from errors
+        successful = [e for e in evidence_items if e["type"] != "error"]
+        errors = [e for e in evidence_items if e["type"] == "error"]
+
+        # ── Finding 1: Case Discovery ──
+        case_items = [e for e in successful if e["type"] == "case_list"]
+        if case_items:
+            all_cases = []
+            for item in case_items:
+                all_cases.extend(item["data"].get("cases", []))
+            findings.append({
+                "category": "Cases Identified",
+                "description": f"Found {len(all_cases)} relevant FIR records matching investigation criteria.",
+                "evidence_sources": [item["engine"] for item in case_items],
+                "data": {"cases": all_cases[:50]},  # Cap for display
+                "strength": self._aggregate_strength([item["strength"] for item in case_items]),
+            })
+
+        # ── Finding 2: Narrative Matches ──
+        rag_items = [e for e in successful if e["type"] == "narrative_matches"]
+        if rag_items:
+            for item in rag_items:
+                findings.append({
+                    "category": "Narrative Intelligence",
+                    "description": item["signal"],
+                    "evidence_sources": [item["engine"]],
+                    "data": item["data"],
+                    "strength": item["strength"],
+                })
+
+        # ── Finding 3: Pattern Clusters ──
+        pattern_items = [e for e in successful if e["type"] == "patterns"]
+        if pattern_items:
+            all_patterns = []
+            for item in pattern_items:
+                all_patterns.extend(item["data"].get("patterns", []))
+            findings.append({
+                "category": "Crime Patterns Detected",
+                "description": f"Identified {len(all_patterns)} emerging pattern clusters.",
+                "evidence_sources": [item["engine"] for item in pattern_items],
+                "data": {"patterns": all_patterns},
+                "strength": self._aggregate_strength([item["strength"] for item in pattern_items]),
+            })
+
+        # ── Finding 4: Trend Analysis ──
+        trend_items = [e for e in successful if e["type"] == "trend"]
+        if trend_items:
+            for item in trend_items:
+                findings.append({
+                    "category": "Temporal Trends",
+                    "description": item["signal"],
+                    "evidence_sources": [item["engine"]],
+                    "data": item["data"],
+                    "strength": item["strength"],
+                })
+
+        # ── Finding 5: Case Similarity ──
+        similarity_items = [e for e in successful if e["type"] == "similar_cases"]
+        if similarity_items:
+            all_similar = []
+            for item in similarity_items:
+                target = item["data"].get("target_case_id")
+                for match in item["data"].get("similar_cases", []):
+                    all_similar.append({
+                        "target_case_id": target,
+                        **match,
+                    })
+            findings.append({
+                "category": "Related Cases (Similarity Analysis)",
+                "description": f"Found {len(all_similar)} cases related through narrative similarity, MO overlap, and spatio-temporal proximity.",
+                "evidence_sources": [item["engine"] for item in similarity_items],
+                "data": {"similar_cases": all_similar},
+                "strength": self._aggregate_strength([item["strength"] for item in similarity_items]),
+            })
+
+        # ── Finding 6: Criminal Networks ──
+        network_items = [e for e in successful if e["type"] == "network"]
+        if network_items:
+            for item in network_items:
+                findings.append({
+                    "category": "Criminal Network Analysis",
+                    "description": item["signal"],
+                    "evidence_sources": [item["engine"]],
+                    "data": item["data"],
+                    "strength": item["strength"],
+                })
+
+        # ── Finding 7: Risk Profiles ──
+        risk_items = [e for e in successful if e["type"] == "risk_profiles"]
+        if risk_items:
+            for item in risk_items:
+                findings.append({
+                    "category": "Offender Risk Assessment",
+                    "description": item["signal"],
+                    "evidence_sources": [item["engine"]],
+                    "data": item["data"],
+                    "strength": item["strength"],
+                })
+
+        # ── Error tracking ──
+        if errors:
+            findings.append({
+                "category": "Engine Failures",
+                "description": f"{len(errors)} engine(s) encountered errors during execution.",
+                "evidence_sources": [e["engine"] for e in errors],
+                "data": {"errors": [{"engine": e["engine"], "message": e["signal"]} for e in errors]},
+                "strength": "none",
+            })
+
+        # ── Cross-correlation finding ──
+        if len(successful) >= 2:
+            evidence_engines = list(set(e["engine"] for e in successful))
+            findings.insert(0, {
+                "category": "Investigation Overview",
+                "description": f"Multi-engine analysis completed using {len(evidence_engines)} intelligence engine(s): {', '.join(evidence_engines)}.",
+                "evidence_sources": evidence_engines,
+                "data": {
+                    "engines_used": evidence_engines,
+                    "total_evidence_items": len(successful),
+                    "errors": len(errors),
+                },
+                "strength": self._aggregate_strength([e["strength"] for e in successful]),
+            })
+
+        summary_stats = {
+            "total_findings": len(findings),
+            "engines_executed": len(set(e["engine"] for e in evidence_items)),
+            "engines_succeeded": len(set(e["engine"] for e in successful)),
+            "engines_failed": len(set(e["engine"] for e in errors)),
+            "overall_strength": self._aggregate_strength([e["strength"] for e in successful]) if successful else "none",
+        }
+
+        return {
+            "findings": findings,
+            "summary_stats": summary_stats,
+            "evidence_graph": evidence_items,
+        }
+
+    def _aggregate_strength(self, strengths: list) -> str:
+        """Deterministic strength aggregation based on count of signal levels."""
+        if not strengths:
+            return "none"
+        strong_count = strengths.count("strong")
+        moderate_count = strengths.count("moderate")
+        if strong_count >= 2:
+            return "strong"
+        if strong_count >= 1 or moderate_count >= 2:
+            return "moderate"
+        if moderate_count >= 1:
+            return "moderate"
+        return "limited"
+
+
+# ════════════════════════════════════════════════════════════════
+#  STEP 4: RESPONSE BUILDER
+# ════════════════════════════════════════════════════════════════
+
+class ResponseBuilder:
+    """
+    Synthesizes a natural-language investigation summary from
+    structured evidence. The LLM summarizes real evidence —
+    it does NOT generate evidence.
+    """
+
+    def __init__(self):
+        self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
+
+    def build_response(self, plan: dict, fused_result: dict) -> dict:
+        """
+        Builds the final investigation response combining structured
+        evidence and NL summary.
+        """
+        findings = fused_result.get("findings", [])
+        stats = fused_result.get("summary_stats", {})
+        evidence_graph = fused_result.get("evidence_graph", [])
+
+        # Build NL summary from evidence
+        summary_text = self._synthesize_summary(plan, findings, stats)
+
+        # Collect all citations
+        citations = self._collect_citations(findings)
+
+        # Build the graph payload (for frontend NetworkGraph)
+        graph_payload = None
+        for finding in findings:
+            if finding["category"] == "Criminal Network Analysis" and finding.get("data", {}).get("nodes"):
+                graph_payload = finding["data"]
+                break
+
+        # Build analytics payload (for trend charts)
+        analytics_payload = None
+        for finding in findings:
+            if finding["category"] == "Temporal Trends" and finding.get("data", {}).get("trend_data"):
+                analytics_payload = {"type": "trend", "data": finding["data"]["trend_data"]}
+                break
+
+        return {
+            "status": "success",
+            "intent_detected": "investigation",
+            "answer": summary_text,
+            "citations": citations,
+            "graph_data": graph_payload,
+            "analytics_data": analytics_payload,
+            "investigation": {
+                "plan": plan,
+                "findings": findings,
+                "summary_stats": stats,
+                "evidence_graph": evidence_graph,
+            },
+            "reasoning_trace": {
+                "execution_steps": [
+                    {"step": 1, "action": "Investigation Planner",
+                     "detail": f"Plan type: {plan.get('investigation_type')}. Engines: {', '.join(plan.get('engines', []))}"},
+                    {"step": 2, "action": "Engine Execution",
+                     "detail": f"Executed {stats.get('engines_succeeded', 0)}/{stats.get('engines_executed', 0)} engines successfully"},
+                    {"step": 3, "action": "Evidence Fusion",
+                     "detail": f"Produced {stats.get('total_findings', 0)} findings. Overall strength: {stats.get('overall_strength', 'unknown')}"},
+                ]
+            }
+        }
+
+    def _synthesize_summary(self, plan: dict, findings: list, stats: dict) -> str:
+        """Generate NL summary of investigation findings using Groq."""
+        if not self.groq_client:
+            return self._fallback_summary(plan, findings, stats)
+
+        # Prepare evidence summary for the LLM (structured, not raw data)
+        evidence_bullets = []
+        for f in findings:
+            if f["category"] in ("Investigation Overview", "Engine Failures"):
+                continue
+            evidence_bullets.append(f"- {f['category']}: {f['description']} (strength: {f['strength']})")
+
+        evidence_text = "\n".join(evidence_bullets) if evidence_bullets else "No evidence found."
+
+        prompt = f"""You are a law enforcement intelligence analyst generating a brief investigation summary.
+
+The investigator asked: "{plan.get('summary', 'Investigation request')}"
+
+Here is the structured evidence collected from multiple intelligence engines:
+{evidence_text}
+
+Write a concise investigation summary (3-5 sentences maximum):
+1. State what was investigated.
+2. Summarize the key findings supported by evidence.
+3. Note any limitations or missing evidence.
+4. Do NOT invent facts. Only reference evidence listed above.
+5. Cite CrimeNo values or Accused IDs where relevant from the evidence.
+6. Be direct and professional. No preamble like "Based on the analysis..."
+
+Investigation Summary:
+"""
+
+        try:
+            response = self.groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="openai/gpt-oss-120b",
+                temperature=0.0,
+                seed=42
+            )
+            return response.choices[0].message.content.strip()
+        except Exception:
+            return self._fallback_summary(plan, findings, stats)
+
+    def _fallback_summary(self, plan: dict, findings: list, stats: dict) -> str:
+        """Deterministic fallback when LLM is unavailable."""
+        engines = plan.get("engines", [])
+        success = stats.get("engines_succeeded", 0)
+        total = stats.get("engines_executed", 0)
+
+        parts = [
+            f"Investigation completed using {success}/{total} intelligence engines ({', '.join(engines)})."
+        ]
+
+        for f in findings:
+            if f["category"] not in ("Investigation Overview", "Engine Failures"):
+                parts.append(f"{f['category']}: {f['description']}")
+
+        return " ".join(parts)
+
+    def _collect_citations(self, findings: list) -> list:
+        """Extract all CrimeNo citations from findings."""
+        citations = set()
+
+        for finding in findings:
+            data = finding.get("data", {})
+            # From case lists
+            for case in data.get("cases", []):
+                cn = case.get("crimeno") or case.get("CrimeNo") or case.get("crime_no")
+                if cn:
+                    citations.add(str(cn))
+            # From similar cases
+            for match in data.get("similar_cases", []):
+                cn = match.get("crime_no")
+                if cn:
+                    citations.add(str(cn))
+            # From RAG
+            for cn in data.get("citations", []):
+                if cn:
+                    citations.add(str(cn))
+            # From patterns
+            for pattern in data.get("patterns", []):
+                for case in pattern.get("cases", []):
+                    cn = case.get("crime_no")
+                    if cn:
+                        citations.add(str(cn))
+
+        return list(citations)[:30]  # Cap at 30
+
+
+# ════════════════════════════════════════════════════════════════
+#  MAIN ENTRY POINT
+# ════════════════════════════════════════════════════════════════
+
+class InvestigationEngine:
+    """
+    Top-level orchestrator for the Investigation Planner pipeline.
+    Coordinates: Plan → Execute → Fuse → Build Response.
+    """
+
+    def __init__(self):
+        self.planner = InvestigationPlanner()
+        self.orchestrator = InvestigationOrchestrator()
+        self.fusion = EvidenceFusion()
+        self.builder = ResponseBuilder()
+
+    def run_investigation(self, request_text: str, rbac_filter: str,
+                          conversation_history: list = None,
+                          nl2sql_engine=None, rag_engine=None,
+                          graph_engine=None, network_engine=None,
+                          pattern_engine=None, analytics_engine=None,
+                          case_explorer_engine=None) -> dict:
+        """
+        Full investigation pipeline.
+
+        Args:
+            request_text: The investigator's natural language request
+            rbac_filter: SQL WHERE clause for row-level security
+            conversation_history: Previous conversation turns for context
+            *engines: Existing engine instances
+
+        Returns:
+            Complete investigation response dict
+        """
+        # Step 1: Generate investigation plan
+        plan = self.planner.create_plan(request_text, conversation_history)
+
+        # Step 2: Execute engines according to plan
+        evidence_items = self.orchestrator.execute_plan(
+            plan=plan,
+            rbac_filter=rbac_filter,
+            nl2sql_engine=nl2sql_engine,
+            rag_engine=rag_engine,
+            graph_engine=graph_engine,
+            network_engine=network_engine,
+            pattern_engine=pattern_engine,
+            analytics_engine=analytics_engine,
+            case_explorer_engine=case_explorer_engine,
+        )
+
+        # Step 3: Fuse evidence
+        fused_result = self.fusion.fuse(evidence_items, plan.get("investigation_type", ""))
+
+        # Step 4: Build response
+        response = self.builder.build_response(plan, fused_result)
+
+        return response
