@@ -189,9 +189,7 @@ class CandidateLeadExtractor:
     def _extract_pattern_leads(self, data: dict, strength: str, sources: list) -> list:
         """
         Extracts leads from pattern detection findings.
-
-        Each pattern cluster with member cases becomes a lead:
-            "Review cases sharing [MO tag] pattern" — N cases in cluster.
+        Converts pattern findings into ACTION-ORIENTED investigative leads.
         """
         leads = []
         patterns = data.get("patterns", [])
@@ -203,6 +201,24 @@ class CandidateLeadExtractor:
             mo_tags = pattern.get("mo_tags", [])
             member_cases = pattern.get("cases", [])
             date_range = pattern.get("date_range", "")
+            crime_head = pattern.get("crime_head", "")
+            crime_sub_head = pattern.get("crime_sub_head", "")
+
+            mo_names = [mo.get("name", "") for mo in mo_tags if mo.get("name")]
+
+            # Build action-oriented label
+            crime_context = crime_sub_head or crime_head or "crime"
+            mo_text = f" sharing '{mo_names[0]}' MO" if mo_names else ""
+            action_label = f"Review {crime_context.lower()} cases{mo_text}"
+            if case_count:
+                action_label = f"Review {case_count} {crime_context.lower()} cases{mo_text}"
+
+            # Build reason with scope context
+            reason = f"{case_count} {crime_context.lower()} cases form an emerging cluster"
+            if mo_names:
+                reason += f" via '{mo_names[0]}' modus operandi"
+            if date_range:
+                reason += f" ({date_range})"
 
             # Pattern strength from case count
             if case_count >= 5:
@@ -222,31 +238,29 @@ class CandidateLeadExtractor:
                         "description": f"Shared MO: {tag_name}",
                         "metadata": {"mo_tag": tag_name},
                     })
-
+            if crime_sub_head:
+                evidence_signals.append({
+                    "signal": "crime_type_match",
+                    "description": f"Crime type: {crime_sub_head}",
+                })
             if date_range:
                 evidence_signals.append({
                     "signal": "temporal_cluster",
                     "description": f"Active during {date_range}",
                 })
-
             evidence_signals.append({
                 "signal": "pattern_membership",
                 "description": f"{case_count} cases share this pattern",
             })
 
-            # Build reason
-            mo_names = [mo.get("name", "") for mo in mo_tags if mo.get("name")]
-            mo_text = f" with MO tags [{', '.join(mo_names)}]" if mo_names else ""
-            reason = f"{case_count} cases{mo_text} form an emerging cluster"
-
             leads.append({
                 "lead_id": f"pattern_{cluster_id}",
                 "type": "pattern_cluster",
-                "priority_score": min(case_count * 12, 80),  # Scale with case count
+                "priority_score": min(case_count * 8, 60),  # Reduced weight — scope matters more than count
                 "target": {
                     "entity_type": "pattern",
                     "entity_id": cluster_id,
-                    "entity_label": theme,
+                    "entity_label": action_label,
                 },
                 "reason": reason,
                 "evidence": evidence_signals,
@@ -254,12 +268,15 @@ class CandidateLeadExtractor:
                 "strength": pattern_strength,
                 "evidence_count": len(evidence_signals),
                 "action_type": "view_patterns",
-                "action_label": "View Pattern",
+                "action_label": "View Cases",
                 "metadata": {
                     "case_count": case_count,
                     "date_range": date_range,
                     "mo_tags": mo_names,
+                    "crime_head": crime_head,
+                    "crime_sub_head": crime_sub_head,
                     "member_case_ids": [c.get("case_id") for c in member_cases if c.get("case_id")][:10],
+                    "districts": pattern.get("districts", []),
                 },
             })
 
@@ -656,8 +673,8 @@ class LeadRanker:
         "none": 0.3,
     }
 
-    def rank(self, leads: list) -> list:
-        """Ranks leads by composite evidence score."""
+    def rank(self, leads: list, scope: dict = None) -> list:
+        """Ranks leads by composite evidence score with objective-aware adjustments."""
         for lead in leads:
             base = lead.get("priority_score", 0)
             ev_bonus = lead.get("evidence_count", 0) * 5
@@ -665,7 +682,21 @@ class LeadRanker:
             strength = lead.get("strength", "none")
             multiplier = self.STRENGTH_MULTIPLIERS.get(strength, 0.5)
 
-            lead["rank_score"] = round((base + ev_bonus + eng_bonus) * multiplier, 1)
+            # Objective-aware bonus: boost leads that match investigation objectives
+            objective_bonus = 0
+            if scope:
+                lead_type = lead.get("type", "")
+                # Boost repeat offender leads if investigator asked for them
+                if scope.get("wants_repeat_offenders") and lead_type in ("repeat_offender", "high_risk_offender"):
+                    objective_bonus += 25
+                # Boost network leads if investigator asked for connections
+                if scope.get("wants_repeat_offenders") and lead_type == "network_connection":
+                    objective_bonus += 15
+                # Boost similar case leads — always relevant
+                if lead_type == "related_case" and lead.get("priority_score", 0) >= 50:
+                    objective_bonus += 10
+
+            lead["rank_score"] = round((base + ev_bonus + eng_bonus + objective_bonus) * multiplier, 1)
 
         # Sort by rank_score descending
         leads.sort(key=lambda x: x.get("rank_score", 0), reverse=True)
@@ -703,6 +734,8 @@ class NextBestActionEngine:
     def generate_next_actions(self, investigation_result: dict) -> dict:
         """
         Generates ranked, deduplicated investigative leads from an investigation result.
+        
+        Pipeline: Extract → Validate Relevance → Deduplicate → Rank → Limit
 
         Args:
             investigation_result: Full output from InvestigationEngine.run_investigation()
@@ -719,6 +752,7 @@ class NextBestActionEngine:
             }
         """
         findings = investigation_result.get("investigation", {}).get("findings", [])
+        plan = investigation_result.get("investigation", {}).get("plan", {})
 
         if not findings:
             return {
@@ -731,17 +765,23 @@ class NextBestActionEngine:
                 "limitations": self._limitations_text(),
             }
 
+        # Extract investigation scope from the plan
+        scope = self._extract_scope(plan, findings)
+
         # Step 1: Extract candidate leads
         raw_leads = self.extractor.extract(findings)
         total_candidates = len(raw_leads)
 
-        # Step 2: Deduplicate
-        deduped = self.deduplicator.deduplicate(raw_leads)
+        # Step 2: Validate relevance against investigation scope
+        relevant_leads = self._validate_relevance(raw_leads, scope)
 
-        # Step 3: Rank
-        ranked = self.ranker.rank(deduped)
+        # Step 3: Deduplicate
+        deduped = self.deduplicator.deduplicate(relevant_leads)
 
-        # Step 4: Limit to top N (don't overwhelm the investigator)
+        # Step 4: Rank with objective-aware scoring
+        ranked = self.ranker.rank(deduped, scope)
+
+        # Step 5: Limit to top N
         max_leads = 10
         top_leads = ranked[:max_leads]
 
@@ -764,6 +804,131 @@ class NextBestActionEngine:
             "methodology": self._methodology_text(),
             "limitations": self._limitations_text(),
         }
+
+    def _extract_scope(self, plan: dict, findings: list) -> dict:
+        """
+        Extracts investigation scope from the plan and findings.
+        Used to validate lead relevance.
+        """
+        scope = {
+            "crime_category": None,
+            "crime_head_id": None,
+            "district_name": None,
+            "district_id": None,
+            "time_window": None,
+            "objectives": [],
+            "investigation_type": plan.get("investigation_type", ""),
+            "keywords": [],
+        }
+
+        filters = plan.get("filters", {})
+        if filters.get("crime_category"):
+            scope["crime_category"] = filters["crime_category"].lower()
+            scope["keywords"].extend(filters["crime_category"].lower().split())
+        if filters.get("crime_head_id"):
+            scope["crime_head_id"] = filters["crime_head_id"]
+        if filters.get("district_name"):
+            scope["district_name"] = filters["district_name"].lower()
+            scope["keywords"].extend(filters["district_name"].lower().split())
+        if filters.get("district_id"):
+            scope["district_id"] = filters["district_id"]
+        if filters.get("time_window"):
+            scope["time_window"] = filters["time_window"]
+        if filters.get("search_keyword"):
+            scope["keywords"].extend(filters["search_keyword"].lower().split())
+
+        # Extract objectives from the plan
+        scope["objectives"] = [o.lower() for o in plan.get("objectives", [])]
+
+        # Check for repeat offender objective
+        objectives_text = " ".join(scope["objectives"]).lower()
+        if "repeat" in objectives_text or "offender" in objectives_text:
+            scope["wants_repeat_offenders"] = True
+        else:
+            scope["wants_repeat_offenders"] = False
+
+        return scope
+
+    def _validate_relevance(self, leads: list, scope: dict) -> list:
+        """
+        Filters leads to only those relevant to the investigation scope.
+        Removes leads that don't match the investigation's crime category,
+        geographic scope, or stated objectives.
+        """
+        if not scope.get("keywords") and not scope.get("crime_category"):
+            # No scope constraints — all leads are relevant
+            return leads
+
+        relevant = []
+        for lead in leads:
+            if self._is_lead_relevant(lead, scope):
+                relevant.append(lead)
+
+        return relevant
+
+    def _is_lead_relevant(self, lead: dict, scope: dict) -> bool:
+        """
+        Checks if a single lead is relevant to the investigation scope.
+        
+        Relevance rules:
+        1. Case leads: must have matching district or crime info
+        2. Pattern leads: must match crime category scope
+        3. Network leads: always relevant if discovered in investigation
+        4. Risk leads: always relevant if discovered in investigation
+        5. All leads: must not contradict scope
+        """
+        lead_type = lead.get("type", "")
+        target = lead.get("target", {})
+        metadata = lead.get("metadata", {})
+        evidence = lead.get("evidence", [])
+
+        # Network and risk leads are always relevant if they came from the investigation
+        if lead_type in ("network_connection", "high_risk_offender"):
+            return True
+
+        # Case leads: check if they match the scope
+        if lead_type == "related_case":
+            # Check if the case's district matches
+            district = (metadata.get("district") or "").lower()
+            if scope.get("district_name") and district:
+                if scope["district_name"] not in district and district not in scope["district_name"]:
+                    # District doesn't match — check if case came from similarity (still relevant)
+                    if not any(e.get("signal") in ("narrative_similarity", "mo_overlap", "geo_proximity", "temporal_proximity")
+                              for e in evidence):
+                        return False
+            return True
+
+        # Pattern leads: must match crime category
+        if lead_type == "pattern_cluster":
+            # Check if the pattern's crime type matches the investigation scope
+            pattern_crime = (metadata.get("crime_sub_head") or metadata.get("crime_head") or "").lower()
+            pattern_mo_tags = [t.lower() for t in metadata.get("mo_tags", [])]
+
+            if scope.get("crime_category"):
+                scope_cat = scope["crime_category"].lower()
+                # Check if pattern crime type matches scope
+                if pattern_crime and scope_cat not in pattern_crime and pattern_crime not in scope_cat:
+                    return False
+                # Check if any keyword from the scope matches the pattern
+                scope_words = set(scope.get("keywords", []))
+                pattern_words = set(pattern_crime.split() + pattern_mo_tags)
+                if scope_words and not scope_words.intersection(pattern_words):
+                    # No keyword overlap — check if the pattern's crime head matches
+                    pattern_head = (metadata.get("crime_head") or "").lower()
+                    if scope_cat not in pattern_head and pattern_head not in scope_cat:
+                        return False
+
+            # Check district if specified
+            if scope.get("district_name"):
+                pattern_districts = [d.lower() for d in metadata.get("districts", [])]
+                if pattern_districts and not any(scope["district_name"] in d or d in scope["district_name"]
+                                                  for d in pattern_districts):
+                    return False
+
+            return True
+
+        # Default: relevant
+        return True
 
     def _methodology_text(self) -> str:
         return (

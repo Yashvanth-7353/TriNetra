@@ -195,6 +195,92 @@ class InvestigationOrchestrator:
     def __init__(self):
         self.db_url = os.getenv("NEON_DATABASE_URL")
 
+    def _resolve_scope(self, filters: dict) -> dict:
+        """
+        Deterministically resolves LLM-generated text filters into database IDs.
+        
+        The LLM planner produces text like:
+            crime_category: "Vehicle Theft"
+            district_name: "Bengaluru"
+        
+        This method resolves them to:
+            crime_head_id: 11 (Motor Vehicle Theft CrimeSubHeadID)
+            district_id: 5 (Bengaluru Urban DistrictID)
+        
+        Uses direct database lookups — no string matching hacks.
+        """
+        if not self.db_url:
+            return filters
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+
+            # Resolve crime_category -> crime_head_id (CrimeSubHeadID or CrimeHeadID)
+            crime_category = filters.get("crime_category")
+            if crime_category and not filters.get("crime_head_id"):
+                cat_lower = crime_category.lower().strip()
+                # First try CrimeSubHead (specific: Motor Vehicle Theft, Burglary, etc.)
+                cur.execute("""
+                    SELECT csh.CrimeSubHeadID, csh.CrimeHeadName, csh.CrimeHeadID
+                    FROM CrimeSubHead csh
+                    WHERE LOWER(csh.CrimeHeadName) LIKE %s
+                    ORDER BY LENGTH(csh.CrimeHeadName) ASC
+                    LIMIT 1
+                """, (f"%{cat_lower}%",))
+                row = cur.fetchone()
+                if row:
+                    filters["crime_sub_head_id"] = row[0]  # Specific: Motor Vehicle Theft = 11
+                    filters["crime_head_id"] = row[2]       # Broad: Crimes Against Property = 2
+                    filters["crime_sub_head_name"] = row[1]
+                else:
+                    # Try CrimeHead (broad: Crimes Against Property, etc.)
+                    cur.execute("""
+                        SELECT CrimeHeadID, CrimeGroupName 
+                        FROM CrimeHead 
+                        WHERE LOWER(CrimeGroupName) LIKE %s
+                        LIMIT 1
+                    """, (f"%{cat_lower}%",))
+                    row = cur.fetchone()
+                    if row:
+                        filters["crime_head_id"] = row[0]
+                        filters["crime_head_name"] = row[1]
+
+            # Resolve district_name -> district_id
+            district_name = filters.get("district_name")
+            if district_name and not filters.get("district_id"):
+                dist_lower = district_name.lower().strip()
+                # Try exact match first, then partial
+                cur.execute("""
+                    SELECT DistrictID, DistrictName 
+                    FROM District 
+                    WHERE LOWER(DistrictName) = %s OR LOWER(DistrictName) LIKE %s
+                    ORDER BY 
+                        CASE WHEN LOWER(DistrictName) LIKE '%%urban%%' THEN 0 ELSE 1 END,
+                        LENGTH(DistrictName) DESC
+                    LIMIT 1
+                """, (dist_lower, f"%{dist_lower}%"))
+                row = cur.fetchone()
+                if row:
+                    filters["district_id"] = row[0]
+                    filters["district_name_resolved"] = row[1]
+
+            # Resolve time_window -> date_from/date_to
+            time_window = filters.get("time_window")
+            if time_window and not filters.get("date_from"):
+                if time_window == "3m":
+                    filters["date_from"] = "NOW() - INTERVAL '3 months'"
+                elif time_window == "6m":
+                    filters["date_from"] = "NOW() - INTERVAL '6 months'"
+                elif time_window == "12m":
+                    filters["date_from"] = "NOW() - INTERVAL '12 months'"
+
+            cur.close()
+            conn.close()
+        except Exception as e:
+            # Scope resolution failed — continue with original filters
+            pass
+        return filters
+
     def execute_plan(self, plan: dict, rbac_filter: str,
                      nl2sql_engine, rag_engine, graph_engine,
                      network_engine, pattern_engine, analytics_engine,
@@ -205,6 +291,11 @@ class InvestigationOrchestrator:
         """
         evidence_items = []
         filters = plan.get("filters", {})
+
+        # Deterministically resolve LLM text filters to database IDs
+        filters = self._resolve_scope(filters)
+        plan["filters"] = filters  # Update plan with resolved IDs
+
         entities = plan.get("entities", {})
         engines_to_run = plan.get("engines", [])
 
@@ -273,40 +364,56 @@ class InvestigationOrchestrator:
 
     def _run_case_query(self, filters: dict, rbac_filter: str,
                         case_explorer_engine, nl2sql_engine) -> list:
-        """Execute SQL-based case search. Returns evidence items."""
+        """Execute SQL-based case search with investigation scope. Returns evidence items."""
         items = []
         try:
-            # Use case_explorer_engine for structured filter-based search
-            district_name = filters.get("district_name")
-            crime_category = filters.get("crime_category")
-            time_window = filters.get("time_window")
-            search_keyword = filters.get("search_keyword")
-
-            # Build case explorer params
+            # Build case explorer params from investigation filters
             params = {
                 "page": 1,
                 "page_size": 50,
             }
             if filters.get("district_id"):
                 params["district_id"] = filters["district_id"]
+            if filters.get("crime_head_id"):
+                params["crime_head_id"] = filters["crime_head_id"]
+            if filters.get("date_from"):
+                params["date_from"] = filters["date_from"]
+            if filters.get("date_to"):
+                params["date_to"] = filters["date_to"]
+            if filters.get("search_keyword"):
+                params["search"] = filters["search_keyword"]
 
             result = case_explorer_engine.search_cases(**params)
 
             if "error" not in result and result.get("cases"):
                 cases = result["cases"]
+
+                # Post-filter by CrimeSubHeadID if specific category was resolved
+                # The case_explorer filters by CrimeMajorHeadID (broad),
+                # but we may need the specific CrimeSubHeadID (e.g., Motor Vehicle Theft)
+                crime_sub_head_id = filters.get("crime_sub_head_id")
+                if crime_sub_head_id and cases:
+                    # Fetch the crime_sub_head names for filtering
+                    sub_head_name = filters.get("crime_sub_head_name", "")
+                    if sub_head_name:
+                        cases = [c for c in cases
+                                 if (c.get("crime_sub_head") or "").lower() == sub_head_name.lower()]
+
                 items.append({
                     "engine": "case_query",
                     "type": "case_list",
                     "data": {
                         "cases": cases,
-                        "total_count": result.get("pagination", {}).get("total_count", 0),
+                        "total_count": len(cases),
                     },
-                    "signal": f"Found {len(cases)} cases matching query criteria",
+                    "signal": f"Found {len(cases)} cases matching investigation criteria",
                     "strength": "strong" if len(cases) >= 5 else "moderate" if len(cases) >= 2 else "limited",
                 })
             else:
                 # Fallback: use NL2SQL for keyword search
+                search_keyword = filters.get("search_keyword")
                 if search_keyword:
+                    district_name = filters.get("district_name")
                     query_text = f"Search for cases involving '{search_keyword}'"
                     if district_name:
                         query_text += f" in {district_name}"
@@ -362,15 +469,31 @@ class InvestigationOrchestrator:
         return items
 
     def _run_pattern_detection(self, filters: dict, pattern_engine) -> list:
-        """Execute MO-based pattern detection. Returns evidence items."""
+        """Execute MO-based pattern detection with investigation scope. Returns evidence items."""
         items = []
         try:
-            result = pattern_engine.get_emerging_patterns()
+            # Use scoped pattern detection that respects crime category and district
+            # Use crime_sub_head_id (specific) if available, otherwise crime_head_id (broad)
+            scoped_crime_id = filters.get("crime_sub_head_id") or filters.get("crime_head_id")
+            district_id = filters.get("district_id")
+            time_window = filters.get("time_window")
+
+            # If we have a scoped method, use it; otherwise fall back to unscoped
+            if hasattr(pattern_engine, 'get_scoped_patterns') and (scoped_crime_id or district_id):
+                result = pattern_engine.get_scoped_patterns(
+                    crime_head_id=scoped_crime_id,
+                    district_id=district_id,
+                    time_window=time_window,
+                )
+            else:
+                result = pattern_engine.get_emerging_patterns()
+
             if "error" not in result and result.get("patterns"):
                 patterns = result["patterns"]
-                # Filter by district if specified
+
+                # Additional district filter if using unscoped method
                 district_name = filters.get("district_name")
-                if district_name:
+                if district_name and not district_id:
                     patterns = [p for p in patterns
                                 if district_name.lower() in
                                 " ".join([str(d) for d in p.get("districts", [])]).lower()
@@ -383,7 +506,7 @@ class InvestigationOrchestrator:
                         "type": "patterns",
                         "data": {"patterns": patterns},
                         "signal": f"Detected {len(patterns)} emerging crime pattern clusters",
-                        "strength": "strong" if len(patterns) >= 3 else "moderate",
+                        "strength": "strong" if len(patterns) >= 3 else "moderate" if len(patterns) >= 1 else "limited",
                     })
         except Exception as e:
             items.append({
@@ -728,18 +851,34 @@ class EvidenceFusion:
         }
 
     def _aggregate_strength(self, strengths: list) -> str:
-        """Deterministic strength aggregation based on count of signal levels."""
+        """Deterministic strength aggregation based on actual evidence quality.
+        
+        A finding is 'strong' only if multiple independent engines provide
+        strong evidence with actionable identifiers (case IDs, accused IDs).
+        A single 'strong' engine result (like case count) is not sufficient.
+        """
         if not strengths:
             return "none"
         strong_count = strengths.count("strong")
         moderate_count = strengths.count("moderate")
+        limited_count = strengths.count("limited")
+        none_count = strengths.count("none")
+        total = len(strengths)
+
+        # Strong: need at least 2 independent strong sources
         if strong_count >= 2:
             return "strong"
-        if strong_count >= 1 or moderate_count >= 2:
+        # Moderate: at least 1 strong + some moderate, or 3+ moderate
+        if strong_count >= 1 and moderate_count >= 1:
             return "moderate"
+        if moderate_count >= 3:
+            return "moderate"
+        # Limited: any mix of moderate/limited
         if moderate_count >= 1:
-            return "moderate"
-        return "limited"
+            return "limited"
+        if limited_count >= 1:
+            return "limited"
+        return "none"
 
 
 # ════════════════════════════════════════════════════════════════

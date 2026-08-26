@@ -105,6 +105,168 @@ class PatternEngine:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    def get_scoped_patterns(self, crime_head_id=None, district_id=None, time_window=None):
+        """
+        Returns emerging MO-based patterns filtered by investigation scope.
+        Unlike get_emerging_patterns() which returns ALL patterns,
+        this method respects crime category, district, and time constraints.
+        
+        Args:
+            crime_head_id: CrimeHeadID to filter by (e.g. 2 for Property Crimes, or a CrimeSubHeadID for specific type)
+            district_id: DistrictID to filter by
+            time_window: '3m', '6m', '12m', or None for default 90 days
+        """
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+
+            # Determine time interval
+            interval = "90 days"
+            if time_window == "3m":
+                interval = "90 days"
+            elif time_window == "6m":
+                interval = "180 days"
+            elif time_window == "12m":
+                interval = "365 days"
+
+            # Build WHERE conditions
+            conditions = [f"cm.CrimeRegisteredDate >= NOW() - INTERVAL '{interval}'"]
+            params = []
+
+            if crime_head_id:
+                # Support both CrimeHeadID (broad) and CrimeSubHeadID (specific)
+                # CrimeSubHeadID 11 = Motor Vehicle Theft, CrimeHeadID 2 = Property Crimes
+                # We check both to support broad and specific matching
+                conditions.append("(cm.CrimeMajorHeadID = %s OR cm.CrimeMinorHeadID = %s)")
+                params.extend([crime_head_id, crime_head_id])
+
+            if district_id:
+                conditions.append("u.DistrictID = %s")
+                params.append(district_id)
+
+            where_clause = " AND ".join(conditions)
+
+            # Find MO tags matching the scoped criteria
+            cur.execute(f"""
+                SELECT 
+                    mo.MOTagID, 
+                    t.MOTagName, 
+                    COUNT(mo.CaseMasterID) as case_count, 
+                    MIN(cm.CrimeRegisteredDate) as start_date, 
+                    MAX(cm.CrimeRegisteredDate) as end_date,
+                    ch.CrimeGroupName,
+                    csh.CrimeHeadName
+                FROM ModusOperandi mo
+                JOIN MOTagMaster t ON mo.MOTagID = t.MOTagID
+                JOIN CaseMaster cm ON mo.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                JOIN CrimeHead ch ON cm.CrimeMajorHeadID = ch.CrimeHeadID
+                LEFT JOIN CrimeSubHead csh ON cm.CrimeMinorHeadID = csh.CrimeSubHeadID
+                WHERE {where_clause}
+                GROUP BY mo.MOTagID, t.MOTagName, ch.CrimeGroupName, csh.CrimeHeadName
+                HAVING COUNT(mo.CaseMasterID) >= 2
+                ORDER BY case_count DESC
+                LIMIT 15
+            """, params)
+            clusters_raw = cur.fetchall()
+
+            patterns = []
+            for r in clusters_raw:
+                mo_tag_id = r[0]
+                tag_name = r[1]
+                count = r[2]
+                start_date = r[3]
+                end_date = r[4]
+                crime_group = r[5]
+                crime_sub = r[6]
+
+                # Get the actual cases for this cluster
+                case_conditions = [f"mo.MOTagID = %s", f"cm.CrimeRegisteredDate >= NOW() - INTERVAL '{interval}'"]
+                case_params = [mo_tag_id]
+
+                if district_id:
+                    case_conditions.append("u.DistrictID = %s")
+                    case_params.append(district_id)
+                if crime_head_id:
+                    case_conditions.append("(cm.CrimeMajorHeadID = %s OR cm.CrimeMinorHeadID = %s)")
+                    case_params.extend([crime_head_id, crime_head_id])
+
+                case_where = " AND ".join(case_conditions)
+                cur.execute(f"""
+                    SELECT 
+                        cm.CaseMasterID, 
+                        cm.CrimeNo, 
+                        cm.BriefFacts, 
+                        cm.CrimeRegisteredDate, 
+                        cm.latitude, 
+                        cm.longitude, 
+                        u.DistrictID, 
+                        d.DistrictName
+                    FROM CaseMaster cm
+                    JOIN ModusOperandi mo ON cm.CaseMasterID = mo.CaseMasterID
+                    JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                    JOIN District d ON u.DistrictID = d.DistrictID
+                    WHERE {case_where}
+                    ORDER BY cm.CrimeRegisteredDate DESC
+                """, case_params)
+                cases_raw = cur.fetchall()
+
+                cases = []
+                districts = set()
+                sparkline_map = defaultdict(int)
+
+                for cr in cases_raw:
+                    dt = cr[3]
+                    if dt:
+                        sparkline_map[dt.strftime("%Y-%W")] += 1
+                    districts.add(cr[7])
+                    cases.append({
+                        "case_id": cr[0],
+                        "crime_no": cr[1],
+                        "brief_facts": cr[2],
+                        "date": dt.strftime('%Y-%m-%d') if dt else None,
+                        "lat": float(cr[4]) if cr[4] else None,
+                        "lng": float(cr[5]) if cr[5] else None,
+                        "district": cr[7]
+                    })
+
+                sparkline = [{"time": k, "count": sparkline_map[k]} for k in sorted(sparkline_map.keys())]
+                days_span = max((end_date - start_date).days, 1) if end_date and start_date else 1
+
+                # Build scope-aware theme
+                scope_parts = []
+                if crime_sub:
+                    scope_parts.append(crime_sub)
+                elif crime_group:
+                    scope_parts.append(crime_group)
+                theme = f"\"{tag_name}\" Cluster"
+                if scope_parts:
+                    theme = f"\"{tag_name}\" {scope_parts[0]} Cluster"
+
+                trigger_reason = f"{count} cases in {days_span} days sharing the '{tag_name}' Modus Operandi."
+                if crime_sub:
+                    trigger_reason = f"{count} {crime_sub.lower()} cases in {days_span} days sharing the '{tag_name}' Modus Operandi."
+
+                patterns.append({
+                    "cluster_id": f"PAT-MO-{mo_tag_id}",
+                    "theme": theme,
+                    "case_count": count,
+                    "date_range": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}" if start_date and end_date else "Recent",
+                    "districts": list(districts),
+                    "trigger_reason": trigger_reason,
+                    "sparkline": sparkline,
+                    "cases": cases,
+                    "mo_tags": [{"name": tag_name, "strength": "Primary"}],
+                    "crime_head": crime_group,
+                    "crime_sub_head": crime_sub,
+                })
+
+            cur.close()
+            conn.close()
+            return {"status": "success", "patterns": patterns}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     def find_similar_cases(self, case_id, k=10):
         try:
             conn = psycopg2.connect(self.db_url)

@@ -1099,19 +1099,48 @@ function NextBestActions({ leads, methodology, limitations }: {
               {activeLeadIdx === idx && (
                 <div className="mt-3 pt-3 border-t border-slate-100">
                   {isLoadingGraph ? (
-                    <div className="h-20 bg-slate-100 animate-pulse rounded-lg" />
-                  ) : evidenceGraph ? (
+                    <div className="h-32 bg-slate-100 animate-pulse rounded-lg" />
+                  ) : evidenceGraph && evidenceGraph.nodes.length > 0 ? (
                     <div>
-                      <div className="text-[10px] font-bold text-emerald-700 mb-2">Evidence Graph — Supporting Evidence</div>
-                      <div className="space-y-1">
-                        {evidenceGraph.edges.slice(0, 5).map((edge, i) => (
-                          <div key={i} className="text-[10px] bg-emerald-50 p-2 rounded border border-emerald-100">
-                            <span className="font-semibold text-emerald-800">{edge.relationship_label}</span>
-                            <span className="text-slate-500 mx-1">—</span>
-                            <span>{edge.evidence?.[0]?.description || edge.relationship}</span>
-                          </div>
-                        ))}
+                      <div className="text-[10px] font-bold text-emerald-700 mb-2">
+                        Evidence Graph ({evidenceGraph.nodes.length} entities, {evidenceGraph.edges.length} relationships)
                       </div>
+                      <div className="h-[280px] bg-white rounded-lg border border-slate-200 overflow-hidden">
+                        <EvidenceGraph
+                          nodes={evidenceGraph.nodes}
+                          edges={evidenceGraph.edges}
+                          compact={true}
+                        />
+                      </div>
+                      {/* Edge evidence details */}
+                      {evidenceGraph.edges.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {evidenceGraph.edges.slice(0, 5).map((edge, i) => (
+                            <div key={i} className="text-[10px] bg-emerald-50 p-2 rounded border border-emerald-100">
+                              <span className="font-semibold text-emerald-800">{edge.relationship_label}</span>
+                              <span className="text-slate-500 mx-1">—</span>
+                              <span>{edge.evidence?.[0]?.description || edge.relationship}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : evidenceGraph ? (
+                    <div className="text-[10px] text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                      <div className="font-semibold mb-1">Evidence Details</div>
+                      {evidenceGraph.edges.length > 0 ? (
+                        <div className="space-y-1">
+                          {evidenceGraph.edges.map((edge, i) => (
+                            <div key={i} className="text-[10px] bg-white p-2 rounded border border-slate-100">
+                              <span className="font-semibold text-slate-700">{edge.relationship_label}</span>
+                              <span className="text-slate-400 mx-1">—</span>
+                              <span>{edge.evidence?.[0]?.description || edge.relationship}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p>No graph relationships available for this lead. Evidence: {leads[idx]?.evidence?.map(e => e.description).join('; ') || 'None'}</p>
+                      )}
                     </div>
                   ) : (
                     <div className="text-[10px] text-slate-400">No evidence graph available.</div>
