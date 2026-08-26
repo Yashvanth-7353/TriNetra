@@ -31,12 +31,14 @@ from engines.investigation import InvestigationEngine
 from engines.evidence_graph import EvidenceGraphBuilder
 from engines.forecasting import CrimeForecastingEngine
 from engines.predictive_hotspots import PredictiveHotspotEngine
+from engines.next_best_action import NextBestActionEngine
 from engines.auth import authenticate_employee, create_jwt_token, verify_jwt_token, get_employee_profile
 
 investigation_engine = InvestigationEngine()
 evidence_graph_builder = EvidenceGraphBuilder()
 forecasting_engine = CrimeForecastingEngine()
 predictive_hotspot_engine = PredictiveHotspotEngine()
+next_best_action_engine = NextBestActionEngine()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -804,6 +806,28 @@ async def get_evidence_graph(request: EvidenceGraphRequest, authorization: Optio
 
 
 # ──────────────────────────────────────────────
+#  Next Best Investigative Action Endpoint
+# ──────────────────────────────────────────────
+
+class NextActionsRequest(BaseModel):
+    investigation_result: dict
+
+@app.post("/api/investigation/next-actions")
+async def get_next_actions(request: NextActionsRequest, authorization: Optional[str] = Header(None)):
+    """
+    Generates evidence-grounded investigative leads from an investigation result.
+    Every lead is traceable to real database records or engine outputs.
+    """
+    _extract_auth_context(authorization)  # Verify auth
+
+    try:
+        result = next_best_action_engine.generate_next_actions(request.investigation_result)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Next actions generation failed: {str(e)}")
+
+
+# ──────────────────────────────────────────────
 #  Crime Forecasting Endpoints
 # ──────────────────────────────────────────────
 
@@ -1097,6 +1121,33 @@ async def export_chat(request: ExportRequest, authorization: Optional[str] = Hea
                                     <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{finding.get('strength', '').upper()}</span>
                                 </div>
                                 <p class="text-slate-600">{finding.get('description', '')}</p>
+                            </div>
+                    """
+                html_content += "</div>"
+
+            # Next Best Investigative Actions
+            if msg.get("nextActions") and msg["nextActions"].get("leads"):
+                leads = msg["nextActions"]["leads"]
+                html_content += f"""
+                        <div class="mt-4 bg-emerald-50 p-4 rounded-lg border border-emerald-200 text-xs">
+                            <h4 class="font-bold text-emerald-800 mb-2">🎯 Next Best Investigative Actions</h4>
+                            <div class="text-[10px] text-emerald-600 mb-2">
+                                {len(leads)} evidence-backed lead{'s' if len(leads) != 1 else ''} identified
+                            </div>
+                """
+                for lead in leads[:10]:
+                    priority_colors = {'high': 'border-l-red-500', 'medium': 'border-l-amber-500', 'low': 'border-l-slate-300'}
+                    border_cls = priority_colors.get(lead.get('priority', ''), 'border-l-slate-200')
+                    html_content += f"""
+                            <div class="bg-white p-3 rounded border border-emerald-100 mb-2 border-l-4 {border_cls}">
+                                <div class="flex justify-between items-center mb-1">
+                                    <span class="font-bold text-slate-800">{lead.get('target', {}).get('entity_label', '')}</span>
+                                    <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">{lead.get('priority', '').upper()}</span>
+                                </div>
+                                <p class="text-slate-600 mb-1">{lead.get('reason', '')}</p>
+                                <div class="text-[9px] text-slate-400">
+                                    Sources: {', '.join(lead.get('source_engines', []))}
+                                </div>
                             </div>
                     """
                 html_content += "</div>"

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, exportChat, transcribeAudio, translateText, type EvidenceEdge, type EvidenceNode } from '../services/api';
+import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, fetchNextBestActions, exportChat, transcribeAudio, translateText, type EvidenceEdge, type EvidenceNode, type NextBestActionLead } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 import EvidenceGraph from '../components/EvidenceGraph';
 import EvidencePanel from '../components/EvidencePanel';
@@ -28,6 +28,15 @@ export interface Message {
     findings: any[];
     summary_stats: any;
     evidence_graph: any[];
+  } | null;
+  nextActions?: {
+    leads: NextBestActionLead[];
+    total_candidates: number;
+    total_leads: number;
+    lead_types: Record<string, number>;
+    engines_used: string[];
+    methodology: string;
+    limitations: string[];
   } | null;
 }
 
@@ -205,6 +214,16 @@ export default function AskTriNetra() {
         }
       }
 
+      // Fetch next best investigative actions if investigation succeeded
+      let nextActionsData: any = null;
+      if (data.investigation && data.investigation.findings && data.investigation.findings.length > 0) {
+        try {
+          nextActionsData = await fetchNextBestActions(data);
+        } catch (naErr) {
+          console.warn('Next best actions generation failed:', naErr);
+        }
+      }
+
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         sender: 'bot',
@@ -215,6 +234,15 @@ export default function AskTriNetra() {
         graph_data: data.graph_data,
         analytics_data: data.analytics_data,
         investigation: data.investigation || null,
+        nextActions: nextActionsData ? {
+          leads: nextActionsData.leads || [],
+          total_candidates: nextActionsData.total_candidates || 0,
+          total_leads: nextActionsData.total_leads || 0,
+          lead_types: nextActionsData.lead_types || {},
+          engines_used: nextActionsData.engines_used || [],
+          methodology: nextActionsData.methodology || '',
+          limitations: nextActionsData.limitations || [],
+        } : null,
       };
 
       setMessages((prev) => [...prev, botMessage]);
@@ -412,6 +440,11 @@ export default function AskTriNetra() {
                 {/* Investigation Findings */}
                 {msg.investigation && msg.investigation.findings && (
                   <InvestigationFindings findings={msg.investigation.findings} stats={msg.investigation.summary_stats} plan={msg.investigation.plan} />
+                )}
+
+                {/* Next Best Investigative Actions */}
+                {msg.nextActions && msg.nextActions.leads && msg.nextActions.leads.length > 0 && (
+                  <NextBestActions leads={msg.nextActions.leads} methodology={msg.nextActions.methodology} limitations={msg.nextActions.limitations} />
                 )}
 
                 {/* Citations */}
@@ -855,6 +888,243 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
               ))}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  NEXT BEST INVESTIGATIVE ACTIONS COMPONENT
+// ════════════════════════════════════════════════════════════════
+
+function NextBestActions({ leads, methodology, limitations }: {
+  leads: NextBestActionLead[];
+  methodology: string;
+  limitations: string[];
+}) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [activeLeadIdx, setActiveLeadIdx] = useState<number | null>(null);
+  const [evidenceGraph, setEvidenceGraph] = useState<{ nodes: EvidenceNode[]; edges: EvidenceEdge[] } | null>(null);
+  const [isLoadingGraph, setIsLoadingGraph] = useState(false);
+
+  if (!leads || leads.length === 0) return null;
+
+  const priorityColor = (priority: string) => {
+    switch (priority) {
+      case 'high': return 'border-l-red-500 bg-red-50/50';
+      case 'medium': return 'border-l-amber-500 bg-amber-50/30';
+      case 'low': return 'border-l-slate-300 bg-slate-50/30';
+      default: return 'border-l-slate-200';
+    }
+  };
+
+  const priorityBadge = (priority: string) => {
+    switch (priority) {
+      case 'high': return 'bg-red-100 text-red-700 border-red-200';
+      case 'medium': return 'bg-amber-100 text-amber-700 border-amber-200';
+      case 'low': return 'bg-slate-100 text-slate-600 border-slate-200';
+      default: return 'bg-slate-50 text-slate-400';
+    }
+  };
+
+  const typeIcon = (type: string) => {
+    switch (type) {
+      case 'related_case': return '📋';
+      case 'repeat_offender': return '👤';
+      case 'network_connection': return '🕸️';
+      case 'pattern_cluster': return '📊';
+      case 'high_risk_offender': return '⚠️';
+      default: return '🔍';
+    }
+  };
+
+  const typeLabel = (type: string) => {
+    switch (type) {
+      case 'related_case': return 'Related Case';
+      case 'repeat_offender': return 'Repeat Offender';
+      case 'network_connection': return 'Network Connection';
+      case 'pattern_cluster': return 'Pattern Cluster';
+      case 'high_risk_offender': return 'High-Risk Offender';
+      default: return type;
+    }
+  };
+
+  const handleAction = (lead: NextBestActionLead) => {
+    const meta = lead.metadata || {};
+    switch (lead.action_type) {
+      case 'view_case':
+        window.open(`/cases?search=${meta.crime_no || lead.target.entity_id}`, '_blank');
+        break;
+      case 'view_network':
+        window.open(`/network?search=${meta.accused_id || lead.target.entity_id}`, '_blank');
+        break;
+      case 'view_profile':
+        window.open(`/offenders?search=${meta.accused_id || lead.target.entity_id}`, '_blank');
+        break;
+      case 'view_patterns':
+        window.open('/pattern-analytics', '_blank');
+        break;
+    }
+  };
+
+  const handleWhy = async (lead: NextBestActionLead, idx: number) => {
+    if (activeLeadIdx === idx) {
+      setActiveLeadIdx(null);
+      setEvidenceGraph(null);
+      return;
+    }
+    setActiveLeadIdx(idx);
+    setIsLoadingGraph(true);
+    try {
+      const finding = {
+        category: typeLabel(lead.type),
+        description: lead.reason,
+        evidence_sources: lead.source_engines,
+        data: {
+          similar_cases: lead.type === 'related_case' ? [{
+            target_case_id: lead.metadata?.target_case_id,
+            case_id: lead.target.entity_id,
+            crime_no: lead.metadata?.crime_no || '',
+            match_score: lead.metadata?.match_score || 0,
+            explanations: lead.evidence.map(e => e.description),
+          }] : [],
+          profiles: lead.type === 'high_risk_offender' ? [{
+            accused_id: lead.target.entity_id,
+            score: lead.metadata?.score || 0,
+            repeat_offender: lead.metadata?.repeat_offender || false,
+          }] : [],
+          cases: lead.type === 'related_case' ? [{
+            casemasterid: lead.target.entity_id,
+            crimeno: lead.metadata?.crime_no || '',
+          }] : [],
+        },
+        strength: lead.strength,
+      };
+      const result = await sendEvidenceGraph(finding);
+      setEvidenceGraph({ nodes: result.nodes, edges: result.edges });
+    } catch (err) {
+      console.warn('Evidence graph failed for lead:', err);
+    } finally {
+      setIsLoadingGraph(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border border-emerald-200 rounded-xl overflow-hidden bg-emerald-50/30">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-emerald-100/50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm">🎯</span>
+          <span className="text-sm font-bold text-emerald-800">Next Best Investigative Actions</span>
+          <span className="text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full border border-emerald-200">
+            {leads.length} lead{leads.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+        {isExpanded ? <ChevronUp className="w-4 h-4 text-emerald-600" /> : <ChevronDown className="w-4 h-4 text-emerald-600" />}
+      </button>
+
+      {isExpanded && (
+        <div className="px-4 pb-4 space-y-3 border-t border-emerald-100">
+          <div className="flex items-center gap-3 text-[10px] font-semibold text-slate-500 mt-2">
+            <span>{leads.filter(l => l.priority === 'high').length} high priority</span>
+            <span>{leads.filter(l => l.priority === 'medium').length} medium</span>
+            <span>{leads.filter(l => l.priority === 'low').length} low</span>
+          </div>
+
+          {leads.map((lead, idx) => (
+            <div
+              key={lead.lead_id}
+              className={`bg-white p-3 rounded-lg border border-slate-100 shadow-sm border-l-4 ${priorityColor(lead.priority)}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-sm">{typeIcon(lead.type)}</span>
+                    <span className="text-xs font-bold text-slate-800">{lead.target.entity_label}</span>
+                    <span className={cn(
+                      "text-[9px] font-bold px-1.5 py-0.5 rounded border",
+                      priorityBadge(lead.priority)
+                    )}>
+                      {lead.priority.toUpperCase()}
+                    </span>
+                    <span className="text-[9px] font-medium text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded">
+                      {typeLabel(lead.type)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 mb-2">{lead.reason}</p>
+                  {lead.evidence.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      {lead.evidence.slice(0, 5).map((ev, i) => (
+                        <span key={i} className="text-[9px] bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-100">
+                          {ev.description.length > 50 ? ev.description.substring(0, 50) + '...' : ev.description}
+                        </span>
+                      ))}
+                      {lead.evidence.length > 5 && (
+                        <span className="text-[9px] text-slate-400">+{lead.evidence.length - 5} more</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1">
+                    <span className="text-[9px] text-slate-400">Sources:</span>
+                    {lead.source_engines.map((eng, i) => (
+                      <span key={i} className="text-[9px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded font-medium">
+                        {eng.replace('_', ' ')}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1 shrink-0">
+                  <button
+                    onClick={() => handleAction(lead)}
+                    className="text-[10px] font-bold px-2 py-1 bg-primary-900 text-white rounded hover:bg-primary-800 transition-colors"
+                  >
+                    {lead.action_label}
+                  </button>
+                  <button
+                    onClick={() => handleWhy(lead, idx)}
+                    className={cn(
+                      "text-[10px] font-bold px-2 py-1 rounded border transition-all",
+                      activeLeadIdx === idx
+                        ? "bg-emerald-600 text-white border-emerald-600"
+                        : "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                    )}
+                  >
+                    WHY?
+                  </button>
+                </div>
+              </div>
+              {activeLeadIdx === idx && (
+                <div className="mt-3 pt-3 border-t border-slate-100">
+                  {isLoadingGraph ? (
+                    <div className="h-20 bg-slate-100 animate-pulse rounded-lg" />
+                  ) : evidenceGraph ? (
+                    <div>
+                      <div className="text-[10px] font-bold text-emerald-700 mb-2">Evidence Graph — Supporting Evidence</div>
+                      <div className="space-y-1">
+                        {evidenceGraph.edges.slice(0, 5).map((edge, i) => (
+                          <div key={i} className="text-[10px] bg-emerald-50 p-2 rounded border border-emerald-100">
+                            <span className="font-semibold text-emerald-800">{edge.relationship_label}</span>
+                            <span className="text-slate-500 mx-1">—</span>
+                            <span>{edge.evidence?.[0]?.description || edge.relationship}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-slate-400">No evidence graph available.</div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+
+          <div className="bg-slate-50 rounded-lg p-3 border border-slate-100 mt-2">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Methodology</div>
+            <div className="text-[10px] text-slate-600 leading-relaxed">{methodology}</div>
+          </div>
         </div>
       )}
     </div>

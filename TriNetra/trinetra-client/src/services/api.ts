@@ -1185,6 +1185,67 @@ export async function fetchPredictiveHotspots(
   return response.json();
 }
 
+// ── Next Best Investigative Action API ──
+
+export interface NextActionEvidence {
+  signal: string;
+  description: string;
+  metadata?: Record<string, any>;
+}
+
+export interface NextActionTarget {
+  entity_type: 'case' | 'person' | 'pattern';
+  entity_id: number | string;
+  entity_label: string;
+}
+
+export interface NextBestActionLead {
+  lead_id: string;
+  type: 'related_case' | 'repeat_offender' | 'network_connection' | 'pattern_cluster' | 'high_risk_offender';
+  priority_score: number;
+  rank_score: number;
+  priority: 'high' | 'medium' | 'low';
+  target: NextActionTarget;
+  reason: string;
+  evidence: NextActionEvidence[];
+  source_engines: string[];
+  strength: 'strong' | 'moderate' | 'limited' | 'none';
+  evidence_count: number;
+  action_type: 'view_case' | 'view_network' | 'view_profile' | 'view_patterns';
+  action_label: string;
+  metadata?: Record<string, any>;
+}
+
+export interface NextBestActionsResponse {
+  status: string;
+  leads: NextBestActionLead[];
+  total_candidates: number;
+  total_leads: number;
+  lead_types: Record<string, number>;
+  engines_used: string[];
+  methodology: string;
+  limitations: string[];
+}
+
+/**
+ * Generates evidence-grounded investigative leads from an investigation result.
+ * Every lead is traceable to real database records or engine outputs.
+ */
+export async function fetchNextBestActions(
+  investigationResult: any
+): Promise<NextBestActionsResponse> {
+  const response = await fetch(`${API_BASE}/api/investigation/next-actions`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ investigation_result: investigationResult }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to generate next actions' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function transcribeAudio(audioBlob: Blob, languageCode: string = 'kn-IN'): Promise<{ transcript: string }> {
   const formData = new FormData();
   formData.append('file', audioBlob, 'speech.wav');
