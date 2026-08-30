@@ -50,32 +50,63 @@ function RevealDiv({ children, className = '', variant = 'up', delay = 0, ...pro
    HERO NETWORK ANIMATION (Pure CSS/SVG)
    ══════════════════════════════════════════════ */
 function HeroNetwork() {
-  const nodes = [
-    { x: 120, y: 80 }, { x: 280, y: 40 }, { x: 440, y: 90 }, { x: 600, y: 50 },
-    { x: 180, y: 180 }, { x: 360, y: 160 }, { x: 520, y: 180 }, { x: 100, y: 260 },
-    { x: 300, y: 250 }, { x: 480, y: 260 }, { x: 650, y: 150 }, { x: 200, y: 320 },
-    { x: 400, y: 320 }, { x: 560, y: 320 },
+  // Primary nodes (more prominent)
+  const primary = [
+    { x: 375, y: 185, r: 5 },  // center
+    { x: 280, y: 120, r: 4 },
+    { x: 470, y: 130, r: 4 },
+    { x: 340, y: 260, r: 4 },
+    { x: 180, y: 200, r: 4 },
+    { x: 560, y: 210, r: 4 },
   ];
-  const edges = [
-    [0,1],[1,2],[2,3],[0,4],[4,5],[5,6],[3,10],[4,7],[7,8],[8,9],[5,8],[9,6],[8,11],[11,12],[12,13],[9,13],[2,5],[6,10]
+  // Secondary nodes (background depth)
+  const secondary = [
+    { x: 120, y: 80, r: 2.5 }, { x: 600, y: 60, r: 2.5 },
+    { x: 100, y: 300, r: 2.5 }, { x: 650, y: 300, r: 2.5 },
+    { x: 200, y: 50, r: 2 }, { x: 520, y: 40, r: 2 },
+    { x: 300, y: 340, r: 2 }, { x: 450, y: 340, r: 2 },
+    { x: 70, y: 170, r: 2 }, { x: 680, y: 170, r: 2 },
   ];
+  const allNodes = [...primary, ...secondary];
+
+  // Edges connecting primary nodes to each other and to secondary nodes
+  const edges: [number, number, number][] = [
+    // Primary–primary connections (stronger)
+    [0,1, 1.2], [0,2, 1.2], [0,3, 1.2], [1,4, 1.0], [2,5, 1.0], [1,2, 0.8], [3,4, 0.8], [3,5, 0.8],
+    // Primary–secondary connections (thinner)
+    [1,8, 0.5], [1,10, 0.5], [2,9, 0.5], [2,11, 0.5],
+    [4,6, 0.5], [4,12, 0.5], [5,7, 0.5], [5,13, 0.5],
+    [3,14, 0.4], [3,15, 0.4], [0,8, 0.3], [0,9, 0.3],
+  ];
+
   return (
-    <svg viewBox="0 0 750 370" className="absolute inset-0 w-full h-full opacity-[0.08] pointer-events-none" aria-hidden="true">
-      {edges.map(([a, b], i) => (
-        <line key={i} x1={nodes[a].x} y1={nodes[a].y} x2={nodes[b].x} y2={nodes[b].y}
-          stroke="#c9a227" strokeWidth="1" className="hero-network-edge"
-          style={{ strokeDasharray: '4 4', animation: `dashFlow ${3 + (i % 3)}s linear infinite` }} />
+    <svg viewBox="0 0 750 370" className="absolute inset-0 w-full h-full pointer-events-none" aria-hidden="true">
+      {/* Edges — muted navy-blue, not gold, to avoid warm tint */}
+      {edges.map(([a, b, w], i) => (
+        <line key={i}
+          x1={allNodes[a].x} y1={allNodes[a].y}
+          x2={allNodes[b].x} y2={allNodes[b].y}
+          stroke="#5b7da1" strokeWidth={w} opacity={i < 8 ? 0.18 : 0.09}
+          className="hero-network-edge"
+          style={{ strokeDasharray: '4 6', animation: `dashFlow ${4 + (i % 4)}s linear infinite` }} />
       ))}
-      {nodes.map((n, i) => (
-        <circle key={i} cx={n.x} cy={n.y} r={3 + (i % 3)} fill="#c9a227"
+      {/* Secondary nodes — faint background depth */}
+      {secondary.map((n, i) => (
+        <circle key={`s${i}`} cx={n.x} cy={n.y} r={n.r}
+          fill="#7b9bbd" opacity={0.2}
           className="hero-network-node"
-          style={{ animation: `nodeFloat ${4 + (i % 4)}s ease-in-out ${i * 0.3}s infinite` }} />
+          style={{ animation: `nodeFloat ${6 + (i % 3)}s ease-in-out ${i * 0.5}s infinite` }} />
       ))}
-      {/* Pulse rings on a few nodes */}
-      {[0, 5, 10].map(i => (
-        <circle key={`p${i}`} cx={nodes[i].x} cy={nodes[i].y} r="12" fill="none" stroke="#c9a227" strokeWidth="0.5"
-          className="hero-pulse" style={{ animation: `heroPulse ${5 + i}s ease-in-out infinite` }} />
+      {/* Primary nodes — slightly brighter, varied sizes */}
+      {primary.map((n, i) => (
+        <circle key={`p${i}`} cx={n.x} cy={n.y} r={n.r}
+          fill="#93a8c1" opacity={i === 0 ? 0.35 : 0.25}
+          className="hero-network-node"
+          style={{ animation: `nodeFloat ${5 + (i % 3)}s ease-in-out ${i * 0.4}s infinite` }} />
       ))}
+      {/* Subtle pulse on center node */}
+      <circle cx={primary[0].x} cy={primary[0].y} r="14" fill="none" stroke="#93a8c1" strokeWidth="0.5" opacity="0.15"
+        className="hero-pulse" style={{ animation: 'heroPulse 6s ease-in-out infinite' }} />
     </svg>
   );
 }
@@ -210,48 +241,67 @@ function CapGroup({ title, icon: Icon, color, items, delay }: {
 export default function LandingPage() {
   const [showArchitecture, setShowArchitecture] = useState(false);
 
-  // Scroll effect for navbar
+  // Smooth scroll-driven navbar resize
   useEffect(() => {
-    const nav = document.getElementById('landing-nav');
-    if (!nav) return;
-    const handleScroll = () => {
-      const scrolled = window.scrollY > 80;
-      const pill = nav.querySelector('div');
-      if (pill) {
-        if (scrolled) {
-          pill.classList.add('shadow-xl', 'shadow-black/10');
-          pill.classList.remove('shadow-lg', 'shadow-black/5');
-        } else {
-          pill.classList.add('shadow-lg', 'shadow-black/5');
-          pill.classList.remove('shadow-xl', 'shadow-black/10');
-        }
-      }
+    const pill = document.getElementById('landing-nav-pill');
+    if (!pill) return;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let ticking = false;
+    const onScroll = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        const y = Math.min(window.scrollY, 250);
+        const p = reducedMotion ? (y > 100 ? 1 : 0) : y / 250;
+        pill.style.setProperty('--nw', `${800 - 180 * p}px`);
+        pill.style.setProperty('--np', `${28 - 14 * p}px`);
+        pill.style.setProperty('--nh', `${10 - 2 * p}px`);
+        pill.style.setProperty('--ng', `${16 - 8 * p}px`);
+        pill.style.setProperty('--nr', `${28 - 8 * p}px`);
+        pill.style.setProperty('--ns', `0 ${4 + 4 * p}px ${12 + 8 * p}px rgba(0,0,0,${0.06 + 0.04 * p})`);
+        ticking = false;
+      });
     };
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => window.removeEventListener('scroll', handleScroll);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-accent-200 selection:text-primary-900 flex flex-col">
 
       {/* ── Floating Navigation Pill ── */}
-      <nav id="landing-nav" className="fixed left-1/2 -translate-x-1/2 z-50 transition-all duration-300" style={{ top: '12px' }}>
-        <div className="bg-white/90 backdrop-blur-xl border border-slate-200/60 rounded-full shadow-lg shadow-black/5 px-3 py-1.5 flex items-center gap-2 sm:gap-4 max-w-[600px] w-[calc(100vw-24px)]">
-          <Link to="/" className="flex items-center gap-2.5 group pl-2 pr-3">
-            <div className="w-8 h-8 rounded-lg overflow-hidden bg-white shadow-sm flex items-center justify-center p-0.5 border border-slate-100 group-hover:shadow-md transition-shadow">
+      <nav className="fixed left-1/2 -translate-x-1/2 z-50" style={{ top: '12px' }}>
+        <div id="landing-nav-pill"
+          className="bg-white/90 backdrop-blur-xl border border-slate-200/60 flex items-center"
+          style={{
+            '--nw': '800px', '--np': '28px', '--nh': '10px', '--ng': '16px', '--nr': '28px',
+            '--ns': '0 4px 12px rgba(0,0,0,0.06)',
+            width: 'var(--nw)',
+            paddingLeft: 'var(--np)', paddingRight: 'var(--np)',
+            paddingTop: 'var(--nh)', paddingBottom: 'var(--nh)',
+            gap: 'var(--ng)', borderRadius: 'var(--nr)',
+            boxShadow: 'var(--ns)',
+            maxWidth: 'calc(100vw - 24px)',
+          } as React.CSSProperties}
+        >
+          <Link to="/" className="flex items-center gap-2.5 group shrink-0">
+            <div className="w-9 h-9 rounded-lg overflow-hidden bg-white shadow-sm flex items-center justify-center p-0.5 border border-slate-100 group-hover:shadow-md transition-shadow">
               <img src="/logo.png" alt="TriNetra Logo" className="w-full h-full object-contain" />
             </div>
-            <span className="font-bold text-base tracking-tight text-primary-900">TRINETRA</span>
+            <span className="font-bold text-[15px] tracking-tight text-primary-900">TRINETRA</span>
           </Link>
-          <div className="h-5 w-px bg-slate-200" />
-          <button onClick={() => setShowArchitecture(true)}
-            className="hidden sm:inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 hover:text-primary-900 transition-colors px-3 py-1.5 rounded-full hover:bg-slate-100/60">
-            <Server className="w-4 h-4" /> Architecture
-          </button>
-          <Link to="/login"
-            className="inline-flex items-center justify-center gap-2 px-5 py-2 rounded-full font-medium text-sm text-white bg-primary-900 hover:bg-primary-800 transition-all duration-200 shadow-sm hover:shadow-md active:scale-[0.98]">
-            <Lock className="w-3.5 h-3.5" /> Log In
-          </Link>
+          <div className="flex-1" />
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+            <button onClick={() => setShowArchitecture(true)}
+              className="hidden sm:inline-flex items-center gap-1.5 text-[13px] font-semibold text-slate-600 hover:text-primary-900 transition-colors px-3 py-2 rounded-full hover:bg-slate-100/60">
+              <Server className="w-4 h-4" /> Architecture
+            </button>
+            <Link to="/login"
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full font-medium text-[13px] text-white bg-primary-900 hover:bg-primary-800 transition-all duration-200 shadow-sm hover:shadow-md active:scale-[0.98]">
+              <Lock className="w-3.5 h-3.5" /> Log In
+            </Link>
+          </div>
         </div>
       </nav>
 
@@ -265,10 +315,10 @@ export default function LandingPage() {
           <div className="absolute inset-0 bg-gradient-to-b from-primary-950 via-primary-900 to-primary-950" />
           {/* Network animation */}
           <HeroNetwork />
-          {/* Radial glow */}
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-accent-500/5 rounded-full blur-3xl hero-pulse" />
+          {/* Radial glow — subtle navy depth, no purple */}
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full blur-3xl hero-pulse" style={{ background: 'radial-gradient(circle, rgba(201,162,39,0.04) 0%, rgba(10,31,68,0.0) 70%)' }} />
 
-          <div className="relative z-10 max-w-5xl mx-auto px-6 text-center pt-24 pb-20">
+          <div className="relative z-10 max-w-5xl mx-auto px-6 text-center pt-28 pb-20">
             {/* Logo */}
             <div className="w-20 h-20 mx-auto mb-8 rounded-2xl border-2 border-accent-500/30 bg-white/10 backdrop-blur-sm p-2.5 flex items-center justify-center" style={{ animation: 'fadeInUp 0.8s cubic-bezier(0.16,1,0.3,1) forwards' }}>
               <img src="/logo.png" alt="TriNetra" className="w-full h-full object-contain" />

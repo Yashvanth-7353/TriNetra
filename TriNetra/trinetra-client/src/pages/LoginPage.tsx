@@ -41,21 +41,35 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-6 selection:bg-accent-200 selection:text-primary-900 relative">
       
-      {/* Navigation Bar */}
-      <nav className="absolute top-0 left-0 w-full bg-white/85 backdrop-blur-lg border-b border-slate-200 z-50">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link to="/" className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity">
-            <div className="w-9 h-9 rounded-md overflow-hidden bg-white shadow-sm flex items-center justify-center p-0.5 border border-slate-100">
+      {/* Floating Navigation Pill — static, no scroll resize */}
+      <nav className="fixed left-1/2 -translate-x-1/2 z-50" style={{ top: '12px' }}>
+        <div
+          className="bg-white/90 backdrop-blur-xl border border-slate-200/60 flex items-center"
+          style={{
+            width: 'min(620px, calc(100vw - 24px))',
+            paddingLeft: '20px', paddingRight: '20px',
+            paddingTop: '10px', paddingBottom: '10px',
+            gap: '16px', borderRadius: '28px',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.07)',
+          } as React.CSSProperties}
+        >
+          <Link to="/" className="flex items-center gap-2.5 group shrink-0">
+            <div className="w-9 h-9 rounded-lg overflow-hidden bg-white shadow-sm flex items-center justify-center p-0.5 border border-slate-100 group-hover:shadow-md transition-shadow">
               <img src="/logo.png" alt="TriNetra Logo" className="w-full h-full object-contain" />
             </div>
-            <span className="font-bold text-lg tracking-tight text-primary-900">
-              TRINETRA
-            </span>
+            <span className="font-bold text-[15px] tracking-tight text-primary-900">TRINETRA</span>
           </Link>
+          <div className="flex-1" />
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+            <Link to="/"
+              className="hidden sm:inline-flex items-center gap-1.5 text-[13px] font-semibold text-slate-600 hover:text-primary-900 transition-colors px-3 py-2 rounded-full hover:bg-slate-100/60">
+              Home
+            </Link>
+          </div>
         </div>
       </nav>
 
-      <div className="w-full max-w-md mt-12">
+      <div className="w-full max-w-md mt-20">
 
         {/* Header */}
         <div className="flex flex-col items-center mb-8 text-center">
