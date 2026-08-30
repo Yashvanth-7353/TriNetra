@@ -331,13 +331,12 @@ export default function LandingPage() {
 
             <p className="text-sm md:text-base text-accent-400 font-bold tracking-[0.25em] uppercase mb-6"
               style={{ animation: 'fadeInUp 0.8s 0.3s cubic-bezier(0.16,1,0.3,1) both' }}>
-              Intelligent Crime Intelligence, Connected
+              Evidence-Driven Crime Intelligence
             </p>
 
             <p className="text-lg md:text-xl text-primary-200 max-w-2xl mx-auto leading-relaxed mb-10"
               style={{ animation: 'fadeInUp 0.8s 0.45s cubic-bezier(0.16,1,0.3,1) both' }}>
-              Turn fragmented crime records into connected investigative intelligence.
-              Ask questions, discover hidden patterns, trace relationships, and act on evidence.
+              Connect fragmented crime records, uncover hidden relationships, and turn evidence into explainable investigative intelligence.
             </p>
 
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4"
