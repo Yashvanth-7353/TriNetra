@@ -64,10 +64,7 @@ export interface Message {
 
 const examplePrompts = [
   { q: "Investigate the recent vehicle theft pattern in Bengaluru and find repeat offenders.", desc: "proves multi-engine investigation planner" },
-  { q: "How many cases were registered in Bengaluru Urban in 2025?", desc: "proves tier-4 factual sql generation" },
-  { q: "Are there any cases involving a fraudulent online transaction near Mysuru?", desc: "proves narrative rag" },
   { q: "Who is connected to accused 3682?", desc: "proves graph triggering & inline canvas embedding" },
-  { q: "How has cyber crime changed in Bengaluru Urban over the last two years?", desc: "proves dynamic trend analysis engine" },
   { q: "Is there anything unusual happening with digital arrest scams recently?", desc: "proves early warning/pattern search" },
   { q: "Find cases similar to CaseMasterID 2817.", desc: "proves tri-signal pgvector case similarity engine" },
   { q: "What is the risk profile for accused 3682?", desc: "proves risk scoring" },
