@@ -60,21 +60,21 @@ export default function AppShell() {
         <span className="font-semibold text-lg tracking-wide whitespace-nowrap">TriNetra</span>
       </Link>
 
-      <nav className="flex-1 overflow-y-auto py-4 flex flex-col gap-1 px-2">
+      <nav className="flex-1 overflow-y-auto py-3 flex flex-col gap-0.5 px-2">
         {navItems.map((item) => (
           <NavLink
             key={item.path}
             to={item.path}
             onClick={() => setIsMobileMenuOpen(false)}
             className={({ isActive }) => cn(
-              "flex items-center gap-3 px-3 py-2.5 rounded-md transition-colors",
+              "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150",
               isActive
                 ? "bg-primary-800 text-accent-500 font-medium"
                 : "text-primary-100 hover:bg-primary-800/50 hover:text-white"
             )}
           >
-            <item.icon className="w-5 h-5 shrink-0" />
-            <span>{item.label}</span>
+            <item.icon className="w-[18px] h-[18px] shrink-0" />
+            <span className="text-[13px]">{item.label}</span>
           </NavLink>
         ))}
       </nav>
@@ -133,7 +133,7 @@ export default function AppShell() {
       {/* Main Content Wrapper */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Topbar */}
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0 z-10 shadow-sm">
+        <header className="h-14 bg-white border-b border-slate-100 flex items-center justify-between px-6 shrink-0 z-10">
           <div className="md:hidden flex items-center gap-3">
             <button onClick={() => setIsMobileMenuOpen(true)} className="text-slate-600 hover:text-primary-900 transition-colors">
               <Menu className="w-6 h-6" />

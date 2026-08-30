@@ -155,7 +155,7 @@ export default function CrimeForecastPage() {
           <select
             value={selectedDistrict}
             onChange={(e) => setSelectedDistrict(e.target.value)}
-            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary-400/20 focus:border-primary-400 outline-none transition-all"
           >
             <option value="">All Districts (Statewide)</option>
             {districts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
@@ -166,7 +166,7 @@ export default function CrimeForecastPage() {
           <select
             value={selectedCategory}
             onChange={(e) => setSelectedCategory(e.target.value)}
-            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary-400/20 focus:border-primary-400 outline-none transition-all"
           >
             <option value="">All Categories</option>
             {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -177,7 +177,7 @@ export default function CrimeForecastPage() {
           <select
             value={horizon}
             onChange={(e) => setHorizon(parseInt(e.target.value))}
-            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary-400/20 focus:border-primary-400 outline-none transition-all"
           >
             <option value={1}>1 Month</option>
             <option value={3}>3 Months</option>

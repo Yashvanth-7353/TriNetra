@@ -50,7 +50,7 @@ export default function PreventionAlerts() {
 
         {/* Current Jurisdiction Badge */}
         {profile && (
-          <span className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-primary-900 text-accent-500 border border-primary-800 shadow-xs">
+          <span className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-primary-900 text-accent-500 border border-primary-800 shadow-sm">
             <MapPin className="w-3.5 h-3.5" />
             Jurisdiction: {profile.district_name || 'My District'}
           </span>
@@ -67,12 +67,12 @@ export default function PreventionAlerts() {
       {/* Cards List */}
       <div className="flex flex-col gap-4">
         {isLoading ? (
-          <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-xs flex flex-col items-center justify-center gap-3">
+          <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center gap-3">
             <Loader2 className="w-8 h-8 text-primary-900 animate-spin" />
             <span className="text-sm font-semibold text-slate-500">Scanning database for anomalies...</span>
           </div>
         ) : alerts.length === 0 ? (
-          <div className="text-center py-16 bg-white rounded-xl border border-slate-200 shadow-xs">
+          <div className="text-center py-16 bg-white rounded-xl border border-slate-200 shadow-sm">
             <Check className="w-12 h-12 text-emerald-500 mx-auto mb-3" />
             <h3 className="text-lg font-bold text-slate-900">All Clear</h3>
             <p className="text-slate-500 text-sm mt-1">No active prevention alerts for your district at this time.</p>

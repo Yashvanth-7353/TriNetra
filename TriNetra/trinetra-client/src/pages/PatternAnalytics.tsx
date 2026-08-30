@@ -261,7 +261,7 @@ export default function PatternAnalytics() {
                     value={targetCaseId}
                     onChange={(e) => setTargetCaseId(e.target.value)}
                     placeholder="Enter CaseMasterID (e.g., 1001)"
-                    className="w-full pl-11 pr-4 py-4 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent shadow-sm text-lg"
+                    className="w-full pl-11 pr-4 py-4 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-400/20 focus:border-primary-400 shadow-sm text-lg transition-all"
                     required
                   />
                 </div>

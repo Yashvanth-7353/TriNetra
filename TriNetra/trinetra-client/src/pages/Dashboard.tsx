@@ -68,11 +68,11 @@ export default function Dashboard() {
     <div className="p-6 max-w-7xl mx-auto space-y-6">
 
       {/* Ask TriNetra Highlight Card */}
-      <section className="bg-primary-900 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden flex flex-col md:flex-row items-center justify-between gap-6 border border-primary-800">
+      <section className="bg-primary-900 rounded-xl p-6 text-white shadow-lg relative overflow-hidden flex flex-col md:flex-row items-center justify-between gap-6 border border-primary-800">
         <div className="absolute -right-20 -top-20 w-64 h-64 bg-accent-500/10 rounded-full blur-3xl"></div>
         <div className="relative z-10 max-w-2xl">
           <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 bg-accent-500 rounded-lg flex items-center justify-center text-primary-900 shadow-sm">
+            <div className="w-10 h-10 bg-accent-500 rounded-lg flex items-center justify-center text-primary-900">
               <MessageSquareText className="w-6 h-6" />
             </div>
             <h2 className="text-2xl font-bold">Ask TriNetra AI Copilot</h2>
@@ -83,7 +83,7 @@ export default function Dashboard() {
         </div>
         <Link
           to="/ask"
-          className="relative z-10 shrink-0 bg-accent-500 hover:bg-accent-400 text-primary-900 font-bold px-8 py-4 rounded-xl shadow-lg shadow-accent-500/20 transition-all flex items-center gap-2 hover:-translate-y-1"
+          className="relative z-10 shrink-0 bg-accent-500 hover:bg-accent-400 text-primary-900 font-bold px-8 py-4 rounded-lg shadow-lg shadow-accent-500/20 transition-all duration-200 flex items-center gap-2 hover:-translate-y-0.5"
         >
           Start New Query
           <ArrowUpRight className="w-5 h-5" />
@@ -92,7 +92,7 @@ export default function Dashboard() {
 
       {/* Error Banner */}
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 shrink-0" />
           Data connection issue: {error}. Please refresh or check database status.
         </div>
@@ -122,7 +122,7 @@ export default function Dashboard() {
           );
 
           return stat.link ? (
-            <Link key={i} to={stat.link} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:border-slate-300 transition-all flex flex-col cursor-pointer">
+            <Link key={i} to={stat.link} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:border-slate-300 hover:shadow-md transition-all duration-200 flex flex-col cursor-pointer group">
               {CardContent}
             </Link>
           ) : (
@@ -176,7 +176,7 @@ export default function Dashboard() {
           </div>
         </section>
 
-        {/* Actionable Prevention Alerts Panel */}
+        {/* Actionable Prevention Alerts Panel — temporarily hidden from dashboard UI
         <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 flex flex-col min-h-[380px]">
           <div className="flex items-center justify-between mb-6">
             <h3 className="font-bold text-lg text-slate-900 flex items-center gap-2">
@@ -221,6 +221,7 @@ export default function Dashboard() {
             )}
           </div>
         </section>
+        */}
       </div>
 
     </div>

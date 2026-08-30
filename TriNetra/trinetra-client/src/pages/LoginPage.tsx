@@ -67,7 +67,7 @@ export default function LoginPage() {
         </div>
 
         {/* Login Card */}
-        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8">
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-8">
           <form onSubmit={handleLogin} className="space-y-6">
 
             {/* Error */}
@@ -120,7 +120,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isLoading}
-              className="w-full h-12 bg-primary-900 hover:bg-primary-800 text-white font-bold rounded-lg transition-colors flex items-center justify-center gap-2 mt-4 disabled:opacity-60"
+              className="w-full h-12 bg-primary-900 hover:bg-primary-800 text-white font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-2 mt-4 disabled:opacity-60 active:scale-[0.98]"
             >
               {isLoading ? (
                 <>

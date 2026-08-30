@@ -92,7 +92,7 @@ export default function OffenderProfiles() {
       </div>
 
       {/* Search and Metadata strip */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-col md:flex-row justify-between items-center gap-4">
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
         {/* Search */}
         <div className="relative w-full md:max-w-md">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -104,7 +104,7 @@ export default function OffenderProfiles() {
               setPage(1);
             }}
             placeholder="Search offender by name or ID..."
-            className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary-900"
+            className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary-400/20 focus:border-primary-400 transition-all"
           />
         </div>
 
@@ -123,39 +123,39 @@ export default function OffenderProfiles() {
       )}
 
       {/* Results Table */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
               {/* Profile Header */}
               <th
                 onClick={() => handleSort('name')}
-                className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
+                className="px-6 py-3.5 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
               >
                 Profile Name {sortKey === 'name' ? (sortOrder === 'asc' ? '↑' : '↓') : ''}
               </th>
               {/* Prior Case Count Header */}
               <th
                 onClick={() => handleSort('prior_case_count')}
-                className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
+                className="px-6 py-3.5 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
               >
                 Priors Count {sortKey === 'prior_case_count' ? (sortOrder === 'asc' ? '↑' : '↓') : ''}
               </th>
               {/* Risk Score Header */}
               <th
                 onClick={() => handleSort('score')}
-                className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
+                className="px-6 py-3.5 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
               >
                 Risk Score {sortKey === 'score' ? (sortOrder === 'asc' ? '↑' : '↓') : ''}
               </th>
               {/* Repeat Offender Flag Header */}
               <th
                 onClick={() => handleSort('repeat_offender')}
-                className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
+                className="px-6 py-3.5 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/70 select-none"
               >
                 Repeat Flag {sortKey === 'repeat_offender' ? (sortOrder === 'asc' ? '↑' : '↓') : ''}
               </th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right select-none">
+              <th className="px-6 py-3.5 text-xs font-bold text-slate-500 uppercase tracking-wider text-right select-none">
                 Details
               </th>
             </tr>

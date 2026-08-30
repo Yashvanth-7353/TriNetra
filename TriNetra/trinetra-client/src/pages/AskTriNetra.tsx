@@ -502,7 +502,7 @@ export default function AskTriNetra() {
             <span className="text-[10px] uppercase tracking-wider bg-emerald-200/60 px-1.5 py-0.5 rounded text-emerald-900 font-bold">Sarvam AI Engine</span>
           </div>
         )}
-        <div className="max-w-4xl mx-auto relative flex items-end gap-2 bg-slate-50 rounded-xl border border-slate-200 p-2 shadow-sm focus-within:border-primary-400 focus-within:ring-1 focus-within:ring-primary-400 transition-all">
+        <div className="max-w-4xl mx-auto relative flex items-end gap-2 bg-slate-50 rounded-xl border border-slate-200 p-2 shadow-sm focus-within:border-primary-400 focus-within:ring-2 focus-within:ring-primary-400/20 transition-all duration-200">
           <button 
             type="button"
             onClick={toggleRecording}
