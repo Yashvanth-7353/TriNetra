@@ -392,9 +392,9 @@ export default function NetworkAnalysis() {
                 <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Try these searches</div>
                 <div className="space-y-2">
                   {[
-                    { id: 3682, label: 'Accused 62 (Shankar Sheikh)', desc: 'Rich network: co-accused + shared Victims + shared MO' },
-                    { id: 3635, label: 'Accused 3635 (Radha Reddy)', desc: 'Interstate MV Theft Ring (co-accused + shared MO)' },
-                    { id: 3559, label: 'Accused 82 (Ayesha Reddy)', desc: 'Isolated offender (tests empty state)' },
+                    { id: 62, label: 'Accused 62 (Shankar Sheikh)', desc: 'Rich network: co-accused + shared Victims + shared MO' },
+                    { id: 3635, label: 'Accused 3635 (Radha Reddy)', desc: 'Simple Network' },
+                    { id: 82, label: 'Accused 82 (Triveni Poojari)', desc: 'Co-Accuse Network' },
                   ].map((ex) => (
                     <button
                       key={ex.id}

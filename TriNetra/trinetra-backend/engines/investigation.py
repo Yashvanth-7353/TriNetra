@@ -1046,6 +1046,10 @@ class ResponseBuilder:
     Synthesizes a natural-language investigation summary from
     structured evidence. The LLM summarizes real evidence —
     it does NOT generate evidence.
+
+    The narrative is derived from a structured evidence inventory
+    extracted from the same finding['data'] that populates the
+    Evidence Graph, ensuring consistency.
     """
 
     def __init__(self):
@@ -1060,8 +1064,11 @@ class ResponseBuilder:
         stats = fused_result.get("summary_stats", {})
         evidence_graph = fused_result.get("evidence_graph", [])
 
-        # Build NL summary from evidence
-        summary_text = self._synthesize_summary(plan, findings, stats)
+        # Extract structured evidence inventory from findings
+        inventory = self._extract_evidence_inventory(findings)
+
+        # Build NL summary from evidence (inventory-aware)
+        summary_text = self._synthesize_summary(plan, findings, stats, inventory)
 
         # Collect all citations
         citations = self._collect_citations(findings)
@@ -1080,6 +1087,9 @@ class ResponseBuilder:
                 analytics_payload = {"type": "trend", "data": finding["data"]["trend_data"]}
                 break
 
+        # Build combined evidence graph from all significant findings
+        combined_evidence_graph = self._build_combined_evidence_graph(findings)
+
         return {
             "status": "success",
             "intent_detected": "investigation",
@@ -1092,6 +1102,8 @@ class ResponseBuilder:
                 "findings": findings,
                 "summary_stats": stats,
                 "evidence_graph": evidence_graph,
+                "evidence_inventory": inventory,
+                "combined_evidence_graph": combined_evidence_graph,
             },
             "reasoning_trace": {
                 "execution_steps": [
@@ -1105,34 +1117,275 @@ class ResponseBuilder:
             }
         }
 
-    def _synthesize_summary(self, plan: dict, findings: list, stats: dict) -> str:
-        """Generate NL summary of investigation findings using Groq."""
-        if not self.groq_client:
-            return self._fallback_summary(plan, findings, stats)
+    # ──────────────────────────────────────────────────────────
+    #  EVIDENCE INVENTORY — extracts real entity identifiers
+    #  from finding['data'], the same source the EvidenceGraph uses
+    # ──────────────────────────────────────────────────────────
 
-        # Prepare evidence summary for the LLM (structured, not raw data)
-        evidence_bullets = []
+    def _extract_evidence_inventory(self, findings: list) -> dict:
+        """
+        Scans all findings and extracts a structured inventory of
+        what evidence actually exists. This is used to:
+        1. Generate an accurate LLM narrative
+        2. Provide the frontend with entity-level summary stats
+
+        The inventory is derived from finding['data'] — the exact
+        same data that EvidenceGraphBuilder.build_from_finding() uses
+        to create graph nodes, ensuring consistency.
+        """
+        crime_nos = set()
+        case_ids = set()
+        pattern_names = []
+        mo_tags = set()
+        accused_ids = set()
+        risk_profiles = []
+        financial_transactions = 0
+        cross_case_links = 0
+        rag_citations = []
+        total_cases = 0
+        total_patterns = 0
+        districts = set()
+
+        for finding in findings:
+            category = finding.get("category", "")
+            data = finding.get("data", {})
+
+            if category in ("Investigation Overview", "Engine Failures"):
+                continue
+
+            # ── Case-level evidence ──
+            cases = data.get("cases", [])
+            if cases:
+                total_cases += len(cases)
+                for case in cases:
+                    cn = case.get("crimeno") or case.get("CrimeNo") or case.get("crime_no")
+                    if cn:
+                        crime_nos.add(str(cn))
+                    cid = case.get("casemasterid") or case.get("CaseMasterID")
+                    if cid:
+                        case_ids.add(int(cid))
+                    dist = case.get("districtname") or case.get("district")
+                    if dist:
+                        districts.add(str(dist))
+
+            # ── Pattern-level evidence ──
+            patterns = data.get("patterns", [])
+            if patterns:
+                total_patterns += len(patterns)
+                for pattern in patterns:
+                    theme = pattern.get("theme")
+                    if theme:
+                        pattern_names.append(theme)
+                    for mo in pattern.get("mo_tags", []):
+                        mo_name = mo.get("name") if isinstance(mo, dict) else str(mo)
+                        if mo_name:
+                            mo_tags.add(mo_name)
+                    # Cases within patterns
+                    for pcase in pattern.get("cases", []):
+                        pcn = pcase.get("crime_no")
+                        if pcn:
+                            crime_nos.add(str(pcn))
+                        pcid = pcase.get("case_id")
+                        if pcid:
+                            case_ids.add(int(pcid))
+                        pdist = pcase.get("district")
+                        if pdist:
+                            districts.add(str(pdist))
+
+            # ── Accused/person-level evidence ──
+            profiles = data.get("profiles", [])
+            if profiles:
+                for p in profiles:
+                    aid = p.get("accused_id")
+                    if aid:
+                        accused_ids.add(int(aid))
+                    risk_profiles.append(p)
+
+            # From network data
+            nodes = data.get("nodes", [])
+            for node in nodes:
+                ntype = node.get("type", "")
+                if ntype == "accused":
+                    nid = node.get("id", "")
+                    # Extract numeric ID from "A3682" style IDs
+                    nid_match = re.search(r'\d+', str(nid))
+                    if nid_match:
+                        accused_ids.add(int(nid_match.group()))
+
+            # ── Similar cases ──
+            similar = data.get("similar_cases", [])
+            for match in similar:
+                scn = match.get("crime_no")
+                if scn:
+                    crime_nos.add(str(scn))
+
+            # ── RAG citations ──
+            cites = data.get("citations", [])
+            for c in cites:
+                if c:
+                    rag_citations.append(str(c))
+
+            # ── Financial evidence ──
+            summary = data.get("summary", {})
+            if isinstance(summary, dict):
+                financial_transactions += summary.get("total_transactions", 0)
+                cross_case_links += summary.get("cross_case_links", 0)
+
+        return {
+            "crime_nos": sorted(list(crime_nos))[:10],
+            "case_ids": sorted(list(case_ids))[:10],
+            "pattern_names": pattern_names[:10],
+            "mo_tags": sorted(list(mo_tags))[:10],
+            "accused_ids": sorted(list(accused_ids))[:10],
+            "districts": sorted(list(districts)),
+            "rag_citations": rag_citations[:5],
+            "risk_profiles": risk_profiles[:5],
+            "has_case_evidence": len(crime_nos) > 0 or len(case_ids) > 0 or total_cases > 0,
+            "has_pattern_evidence": total_patterns > 0,
+            "has_accused_evidence": len(accused_ids) > 0,
+            "has_financial_evidence": financial_transactions > 0,
+            "has_rag_evidence": len(rag_citations) > 0,
+            "total_cases": total_cases,
+            "total_patterns": total_patterns,
+            "total_financial_transactions": financial_transactions,
+            "total_cross_case_links": cross_case_links,
+        }
+
+    # ──────────────────────────────────────────────────────────
+    #  COMBINED EVIDENCE GRAPH — merges graphs from all findings
+    # ──────────────────────────────────────────────────────────
+
+    def _build_combined_evidence_graph(self, findings: list) -> dict:
+        """
+        Builds a single merged evidence graph from all significant findings.
+        Uses EvidenceGraphBuilder per-finding and deduplicates nodes.
+        Returns {"nodes": [...], "edges": [...]} or None if no graph data.
+        """
+        try:
+            from engines.evidence_graph import EvidenceGraphBuilder
+            builder = EvidenceGraphBuilder()
+        except ImportError:
+            return None
+
+        combined_nodes = []
+        combined_edges = []
+        seen_node_ids = set()
+        seen_edge_ids = set()
+
+        # Build graph from significant findings (skip overview/errors)
+        graph_worthy_categories = [
+            "Crime Patterns Detected",
+            "Cases Identified",
+            "Criminal Network Analysis",
+            "Related Cases (Similarity Analysis)",
+            "Offender Risk Assessment",
+            "Financial Intelligence",
+        ]
+
+        for finding in findings:
+            if finding.get("category") not in graph_worthy_categories:
+                continue
+            try:
+                result = builder.build_from_finding(finding)
+                for node in result.get("nodes", []):
+                    if node["id"] not in seen_node_ids:
+                        seen_node_ids.add(node["id"])
+                        combined_nodes.append(node)
+                for edge in result.get("edges", []):
+                    if edge["id"] not in seen_edge_ids:
+                        seen_edge_ids.add(edge["id"])
+                        combined_edges.append(edge)
+            except Exception:
+                continue  # Skip individual finding graph failures
+
+        if combined_nodes:
+            return {
+                "nodes": combined_nodes,
+                "edges": combined_edges,
+            }
+        return None
+
+    # ──────────────────────────────────────────────────────────
+    #  NARRATIVE SYNTHESIS — evidence-inventory-aware
+    # ──────────────────────────────────────────────────────────
+
+    def _synthesize_summary(self, plan: dict, findings: list, stats: dict, inventory: dict) -> str:
+        """
+        Generate NL summary using the structured evidence inventory.
+        The inventory contains real entity identifiers extracted from
+        the same finding['data'] that the Evidence Graph uses.
+        """
+        if not self.groq_client:
+            return self._fallback_summary(plan, findings, stats, inventory)
+
+        # Build detailed evidence description including actual identifiers
+        evidence_sections = []
         for f in findings:
             if f["category"] in ("Investigation Overview", "Engine Failures"):
                 continue
-            evidence_bullets.append(f"- {f['category']}: {f['description']} (strength: {f['strength']})")
+            evidence_sections.append(f"- {f['category']}: {f['description']} (strength: {f['strength']})")
 
-        evidence_text = "\n".join(evidence_bullets) if evidence_bullets else "No evidence found."
+        evidence_text = "\n".join(evidence_sections) if evidence_sections else "No evidence found."
+
+        # Build entity-level detail from inventory
+        entity_details = []
+        if inventory["has_case_evidence"]:
+            cn_sample = ", ".join(inventory["crime_nos"][:5])
+            entity_details.append(
+                f"CASE-LEVEL EVIDENCE EXISTS: {inventory['total_cases']} case records found."
+                + (f" Sample CrimeNo values: {cn_sample}." if cn_sample else "")
+                + (f" Districts: {', '.join(inventory['districts'][:3])}." if inventory["districts"] else "")
+            )
+        else:
+            entity_details.append("CASE-LEVEL EVIDENCE: No specific case records were returned by the engines.")
+
+        if inventory["has_pattern_evidence"]:
+            pn = ", ".join(f"'{p}'" for p in inventory["pattern_names"][:3])
+            mo = ", ".join(f"'{m}'" for m in inventory["mo_tags"][:4])
+            entity_details.append(
+                f"PATTERN-LEVEL EVIDENCE EXISTS: {inventory['total_patterns']} pattern cluster(s) detected."
+                + (f" Patterns: {pn}." if pn else "")
+                + (f" MO tags: {mo}." if mo else "")
+            )
+        else:
+            entity_details.append("PATTERN-LEVEL EVIDENCE: No crime patterns were detected.")
+
+        if inventory["has_accused_evidence"]:
+            aids = ", ".join(str(a) for a in inventory["accused_ids"][:5])
+            entity_details.append(f"ACCUSED-LEVEL EVIDENCE EXISTS: Accused IDs found: {aids}.")
+            high_risk = [p for p in inventory["risk_profiles"] if p.get("score", 0) >= 70]
+            if high_risk:
+                entity_details.append(f"  High-risk offenders: {len(high_risk)} (score >= 70).")
+        else:
+            entity_details.append("ACCUSED-LEVEL EVIDENCE: No specific accused individuals were identified in the returned data.")
+
+        if inventory["has_financial_evidence"]:
+            entity_details.append(
+                f"FINANCIAL EVIDENCE EXISTS: {inventory['total_financial_transactions']} transactions, "
+                f"{inventory['total_cross_case_links']} cross-case links."
+            )
+
+        entity_text = "\n".join(entity_details)
 
         prompt = f"""You are a law enforcement intelligence analyst generating a brief investigation summary.
 
 The investigator asked: "{plan.get('summary', 'Investigation request')}"
 
-Here is the structured evidence collected from multiple intelligence engines:
+EVIDENCE FROM INTELLIGENCE ENGINES:
 {evidence_text}
 
-Write a concise investigation summary (3-5 sentences maximum):
+ENTITY-LEVEL EVIDENCE INVENTORY:
+{entity_text}
+
+Write a concise investigation summary (3-5 sentences maximum). STRICT RULES:
 1. State what was investigated.
-2. Summarize the key findings supported by evidence.
-3. Note any limitations or missing evidence.
-4. Do NOT invent facts. Only reference evidence listed above.
-5. Cite CrimeNo values or Accused IDs where relevant from the evidence.
-6. Be direct and professional. No preamble like "Based on the analysis..."
+2. If CASE-LEVEL EVIDENCE EXISTS, acknowledge it and cite specific CrimeNo values from the inventory.
+3. If PATTERN-LEVEL EVIDENCE EXISTS, name the actual patterns and MO tags found.
+4. If ACCUSED-LEVEL EVIDENCE does NOT exist, say that accused-level attribution is not established — but do NOT claim that case or pattern evidence is also missing.
+5. NEVER claim "no specific CrimeNo values" if the inventory shows case evidence exists.
+6. NEVER claim a confirmed repeat offender unless ACCUSED-LEVEL EVIDENCE actually supports it.
+7. Do NOT invent any facts. Only reference what is listed above.
+8. Be direct and professional. No preamble like "Based on the analysis..."
 
 Investigation Summary:
 """
@@ -1146,10 +1399,16 @@ Investigation Summary:
             )
             return response.choices[0].message.content.strip()
         except Exception:
-            return self._fallback_summary(plan, findings, stats)
+            return self._fallback_summary(plan, findings, stats, inventory)
 
-    def _fallback_summary(self, plan: dict, findings: list, stats: dict) -> str:
-        """Deterministic fallback when LLM is unavailable."""
+    def _fallback_summary(self, plan: dict, findings: list, stats: dict, inventory: dict = None) -> str:
+        """
+        Deterministic fallback when LLM is unavailable.
+        Uses the evidence inventory to generate an accurate summary.
+        """
+        if inventory is None:
+            inventory = self._extract_evidence_inventory(findings)
+
         engines = plan.get("engines", [])
         success = stats.get("engines_succeeded", 0)
         total = stats.get("engines_executed", 0)
@@ -1158,9 +1417,40 @@ Investigation Summary:
             f"Investigation completed using {success}/{total} intelligence engines ({', '.join(engines)})."
         ]
 
-        for f in findings:
-            if f["category"] not in ("Investigation Overview", "Engine Failures"):
-                parts.append(f"{f['category']}: {f['description']}")
+        # Case-level evidence
+        if inventory["has_case_evidence"]:
+            cn_sample = ", ".join(inventory["crime_nos"][:3])
+            msg = f"Identified {inventory['total_cases']} relevant case records"
+            if cn_sample:
+                msg += f" (including CrimeNo {cn_sample})"
+            msg += "."
+            parts.append(msg)
+
+        # Pattern-level evidence
+        if inventory["has_pattern_evidence"]:
+            pn = ", ".join(f"'{p}'" for p in inventory["pattern_names"][:2])
+            msg = f"Detected {inventory['total_patterns']} crime pattern cluster(s)"
+            if pn:
+                msg += f": {pn}"
+            if inventory["mo_tags"]:
+                msg += f" with MO tags including '{list(inventory['mo_tags'])[0]}'"
+            msg += "."
+            parts.append(msg)
+
+        # Accused-level evidence
+        if inventory["has_accused_evidence"]:
+            aids = ", ".join(str(a) for a in inventory["accused_ids"][:3])
+            parts.append(f"Accused-level evidence identified for IDs: {aids}.")
+        else:
+            if inventory["has_case_evidence"] or inventory["has_pattern_evidence"]:
+                parts.append("No accused-level identifiers were found; patterns should be treated as investigative leads.")
+
+        # Financial evidence
+        if inventory["has_financial_evidence"]:
+            parts.append(
+                f"Financial analysis found {inventory['total_financial_transactions']} transactions"
+                f" and {inventory['total_cross_case_links']} cross-case links."
+            )
 
         return " ".join(parts)
 
@@ -1192,6 +1482,7 @@ Investigation Summary:
                         citations.add(str(cn))
 
         return list(citations)[:30]  # Cap at 30
+
 
 
 # ════════════════════════════════════════════════════════════════

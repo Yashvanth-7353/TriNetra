@@ -901,6 +901,28 @@ export interface InvestigationResponse {
       overall_strength: string;
     };
     evidence_graph: any[];
+    evidence_inventory: {
+      crime_nos: string[];
+      case_ids: number[];
+      pattern_names: string[];
+      mo_tags: string[];
+      accused_ids: number[];
+      districts: string[];
+      risk_profiles: any[];
+      has_case_evidence: boolean;
+      has_pattern_evidence: boolean;
+      has_accused_evidence: boolean;
+      has_financial_evidence: boolean;
+      has_rag_evidence: boolean;
+      total_cases: number;
+      total_patterns: number;
+      total_financial_transactions: number;
+      total_cross_case_links: number;
+    } | null;
+    combined_evidence_graph: {
+      nodes: EvidenceNode[];
+      edges: EvidenceEdge[];
+    } | null;
   };
   reasoning_trace: {
     execution_steps: ReasoningStep[];

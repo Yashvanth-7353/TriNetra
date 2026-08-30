@@ -141,17 +141,25 @@ export default function EvidenceGraph({
       const pos = layoutNodes[n.id] || { x: 300, y: 200 };
       const colors = NODE_COLORS[n.type] || NODE_COLORS.case;
       const icon = NODE_ICONS[n.type] || '•';
-      const size = compact ? 110 : 140;
+      const size = compact ? 115 : 150;
 
       return {
         id: n.id,
         position: pos,
         data: {
           label: (
-            <div style={{ textAlign: 'center', lineHeight: 1.3 }}>
+            <div style={{ textAlign: 'center', lineHeight: 1.3 }} title={n.label}>
               <div style={{ fontSize: compact ? 12 : 14 }}>{icon}</div>
-              <div style={{ fontWeight: 700, fontSize: compact ? 9 : 11, wordBreak: 'break-word' }}>
-                {n.label.length > 25 ? n.label.slice(0, 22) + '...' : n.label}
+              <div style={{
+                fontWeight: 700,
+                fontSize: compact ? 9 : 11,
+                wordBreak: 'break-word',
+                overflow: 'hidden',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical' as any,
+              }}>
+                {n.label.length > 42 ? n.label.slice(0, 39) + '...' : n.label}
               </div>
               <div style={{ fontSize: 8, opacity: 0.7, marginTop: 1 }}>
                 {n.type.replace('_', ' ')}

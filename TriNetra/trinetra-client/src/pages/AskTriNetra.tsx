@@ -28,6 +28,28 @@ export interface Message {
     findings: any[];
     summary_stats: any;
     evidence_graph: any[];
+    evidence_inventory?: {
+      crime_nos: string[];
+      case_ids: number[];
+      pattern_names: string[];
+      mo_tags: string[];
+      accused_ids: number[];
+      districts: string[];
+      risk_profiles: any[];
+      has_case_evidence: boolean;
+      has_pattern_evidence: boolean;
+      has_accused_evidence: boolean;
+      has_financial_evidence: boolean;
+      has_rag_evidence: boolean;
+      total_cases: number;
+      total_patterns: number;
+      total_financial_transactions: number;
+      total_cross_case_links: number;
+    } | null;
+    combined_evidence_graph?: {
+      nodes: any[];
+      edges: any[];
+    } | null;
   } | null;
   nextActions?: {
     leads: NextBestActionLead[];
@@ -439,7 +461,13 @@ export default function AskTriNetra() {
 
                 {/* Investigation Findings */}
                 {msg.investigation && msg.investigation.findings && (
-                  <InvestigationFindings findings={msg.investigation.findings} stats={msg.investigation.summary_stats} plan={msg.investigation.plan} />
+                  <InvestigationFindings
+                    findings={msg.investigation.findings}
+                    stats={msg.investigation.summary_stats}
+                    plan={msg.investigation.plan}
+                    evidenceGraph={msg.investigation.combined_evidence_graph || null}
+                    evidenceInventory={msg.investigation.evidence_inventory || null}
+                  />
                 )}
 
                 {/* Next Best Investigative Actions */}
@@ -634,10 +662,16 @@ function ReasoningTrace({ steps }: { steps: any[] }) {
   );
 }
 
-function InvestigationFindings({ findings, stats, plan }: { findings: any[]; stats: any; plan: any }) {
+function InvestigationFindings({ findings, stats, plan, evidenceGraph, evidenceInventory }: {
+  findings: any[];
+  stats: any;
+  plan: any;
+  evidenceGraph: { nodes: EvidenceNode[]; edges: EvidenceEdge[] } | null;
+  evidenceInventory: any;
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeFindingIdx, setActiveFindingIdx] = useState<number | null>(null);
-  const [evidenceGraph, setEvidenceGraph] = useState<{ nodes: EvidenceNode[]; edges: EvidenceEdge[] } | null>(null);
+  const [whyEvidenceGraph, setWhyEvidenceGraph] = useState<{ nodes: EvidenceNode[]; edges: EvidenceEdge[] } | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<EvidenceEdge | null>(null);
   const [selectedNode, setSelectedNode] = useState<EvidenceNode | null>(null);
   const [isLoadingGraph, setIsLoadingGraph] = useState(false);
@@ -668,7 +702,6 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
     }
   };
 
-  // Findings that support WHY (have data with entities)
   const whyCapableCategories = [
     'Related Cases (Similarity Analysis)',
     'Crime Patterns Detected',
@@ -678,23 +711,26 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
     'Financial Intelligence',
   ];
 
-  const displayFindings = findings.filter(f => 
+  const displayFindings = findings.filter(f =>
     f.category !== 'Investigation Overview' && f.category !== 'Engine Failures'
   );
+  const overview = findings.find(f => f.category === 'Investigation Overview');
   const errors = findings.find(f => f.category === 'Engine Failures');
 
+  const hasGraph = evidenceGraph && evidenceGraph.nodes.length > 0;
+  const inv = evidenceInventory;
+
   const handleWhyClick = async (finding: any, idx: number) => {
-    // Toggle if same finding
     if (activeFindingIdx === idx) {
       setActiveFindingIdx(null);
-      setEvidenceGraph(null);
+      setWhyEvidenceGraph(null);
       setSelectedEdge(null);
       setSelectedNode(null);
       return;
     }
 
     setActiveFindingIdx(idx);
-    setEvidenceGraph(null);
+    setWhyEvidenceGraph(null);
     setSelectedEdge(null);
     setSelectedNode(null);
     setIsLoadingGraph(true);
@@ -702,7 +738,7 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
 
     try {
       const result = await sendEvidenceGraph(finding);
-      setEvidenceGraph({ nodes: result.nodes, edges: result.edges });
+      setWhyEvidenceGraph({ nodes: result.nodes, edges: result.edges });
     } catch (err: any) {
       setGraphError(err.message || 'Failed to load evidence graph');
     } finally {
@@ -718,7 +754,7 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
 
   return (
     <div className="mt-4 border border-indigo-200 rounded-xl overflow-hidden bg-indigo-50/30">
-      <button 
+      <button
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full flex items-center justify-between px-4 py-3 hover:bg-indigo-100/50 transition-colors"
       >
@@ -736,7 +772,9 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
       </button>
 
       {isExpanded && (
-        <div className="px-4 pb-4 space-y-3 border-t border-indigo-100">
+        <div className="px-4 pb-4 space-y-4 border-t border-indigo-100">
+
+          {/* ── 1. Investigation Summary ── */}
           {plan && (
             <div className="mt-3 p-3 bg-white rounded-lg border border-indigo-100">
               <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-1">Investigation Plan</div>
@@ -759,6 +797,159 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
             </div>
           )}
 
+          {/* ── 2. Evidence Summary (from evidence_inventory) ── */}
+          {inv && (
+            <div className="bg-white rounded-lg border border-indigo-100 p-3">
+              <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2">Evidence Summary</div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                {inv.has_case_evidence && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-blue-50 rounded border border-blue-100">
+                    <span className="text-blue-600">📋</span>
+                    <div>
+                      <span className="font-bold text-blue-800">{inv.total_cases} case{inv.total_cases !== 1 ? 's' : ''}</span>
+                      {inv.crime_nos?.length > 0 && (
+                        <div className="text-blue-600 truncate max-w-[150px]" title={inv.crime_nos.join(', ')}>
+                          FIR #{inv.crime_nos.slice(0, 2).join(', ')}{inv.crime_nos.length > 2 ? ` +${inv.crime_nos.length - 2}` : ''}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {!inv.has_case_evidence && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-slate-50 rounded border border-slate-100">
+                    <span className="text-slate-400">📋</span>
+                    <span className="text-slate-500 font-medium">No specific case records identified</span>
+                  </div>
+                )}
+                {inv.has_pattern_evidence && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-purple-50 rounded border border-purple-100">
+                    <span className="text-purple-600">📊</span>
+                    <div>
+                      <span className="font-bold text-purple-800">{inv.total_patterns} pattern{inv.total_patterns !== 1 ? 's' : ''}</span>
+                      {inv.mo_tags?.length > 0 && (
+                        <div className="text-purple-600 truncate max-w-[150px]" title={inv.mo_tags.join(', ')}>
+                          {inv.mo_tags.slice(0, 2).join(', ')}{inv.mo_tags.length > 2 ? ` +${inv.mo_tags.length - 2}` : ''}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {!inv.has_pattern_evidence && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-slate-50 rounded border border-slate-100">
+                    <span className="text-slate-400">📊</span>
+                    <span className="text-slate-500 font-medium">No crime patterns detected</span>
+                  </div>
+                )}
+                {inv.has_accused_evidence && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-red-50 rounded border border-red-100">
+                    <span className="text-red-600">👤</span>
+                    <div>
+                      <span className="font-bold text-red-800">{inv.accused_ids?.length || 0} accused identified</span>
+                      {inv.accused_ids?.length > 0 && (
+                        <div className="text-red-600">
+                          IDs: {inv.accused_ids.slice(0, 3).join(', ')}{inv.accused_ids.length > 3 ? ` +${inv.accused_ids.length - 3}` : ''}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {!inv.has_accused_evidence && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-slate-50 rounded border border-slate-100">
+                    <span className="text-slate-400">👤</span>
+                    <span className="text-slate-500 font-medium">Offender attribution not established</span>
+                  </div>
+                )}
+                {inv.has_financial_evidence && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-emerald-50 rounded border border-emerald-100">
+                    <span className="text-emerald-600">💰</span>
+                    <div>
+                      <span className="font-bold text-emerald-800">{inv.total_financial_transactions} transaction{(inv.total_financial_transactions || 0) !== 1 ? 's' : ''}</span>
+                      {(inv.total_cross_case_links || 0) > 0 && (
+                        <div className="text-emerald-600">{inv.total_cross_case_links} cross-case link{(inv.total_cross_case_links || 0) !== 1 ? 's' : ''}</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {inv.risk_profiles?.length > 0 && (
+                  <div className="flex items-center gap-2 text-[10px] p-2 bg-amber-50 rounded border border-amber-100">
+                    <span className="text-amber-600">⚠️</span>
+                    <div>
+                      {(() => {
+                        const highRisk = inv.risk_profiles.filter((p: any) => p.score >= 70);
+                        return (
+                          <>
+                            <span className="font-bold text-amber-800">{inv.risk_profiles.length} risk profile{(inv.risk_profiles.length) !== 1 ? 's' : ''}</span>
+                            {highRisk.length > 0 && (
+                              <div className="text-red-600 font-bold">{highRisk.length} high-risk</div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── 3. Evidence Graph (shown by default when available) ── */}
+          {hasGraph && (
+            <div className="bg-white rounded-lg border border-indigo-100 overflow-hidden">
+              <div className="px-3 py-2 border-b border-indigo-100 flex items-center justify-between">
+                <div className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider">
+                  Evidence Network ({evidenceGraph!.nodes.length} entities, {evidenceGraph!.edges.length} relationships)
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {['case', 'person', 'mo_tag', 'pattern', 'risk_score', 'account', 'location'].map(type => {
+                    const count = evidenceGraph!.nodes.filter(n => n.type === type).length;
+                    if (count === 0) return null;
+                    const labels: Record<string, string> = {
+                      case: '📋', person: '👤', mo_tag: '🎯', pattern: '🔗',
+                      risk_score: '⚠️', account: '💰', location: '📍',
+                    };
+                    return (
+                      <span key={type} className="text-[9px] text-slate-500">
+                        {labels[type]} {count}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="h-[400px] md:h-[450px]">
+                <EvidenceGraph
+                  nodes={evidenceGraph!.nodes}
+                  edges={evidenceGraph!.edges}
+                  selectedEdgeId={selectedEdge?.id}
+                  onEdgeClick={(edge) => { setSelectedEdge(edge); setSelectedNode(null); }}
+                  onNodeClick={(node) => { setSelectedNode(node); setSelectedEdge(null); }}
+                />
+              </div>
+              {(selectedEdge || selectedNode) && (
+                <div className="border-t border-indigo-100">
+                  <EvidencePanel
+                    edge={selectedEdge}
+                    node={selectedNode}
+                    allNodes={evidenceGraph!.nodes}
+                    allEdges={evidenceGraph!.edges}
+                    onClose={() => { setSelectedEdge(null); setSelectedNode(null); }}
+                    onViewRecord={handleViewRecord}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Empty graph state */}
+          {!hasGraph && (
+            <div className="bg-white rounded-lg border border-indigo-100 p-4 text-center">
+              <div className="text-slate-400 text-xs">
+                <span className="text-sm block mb-1">🕸️</span>
+                No relationship graph available for the current investigation results.
+              </div>
+            </div>
+          )}
+
+          {/* ── 4. Findings ── */}
           {displayFindings.map((finding, idx) => {
             const hasWhy = whyCapableCategories.some(cat => finding.category.includes(cat.replace('Related Cases (Similarity Analysis)', 'Similarity')));
             const isWhyActive = activeFindingIdx === idx;
@@ -867,13 +1058,13 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
                   </div>
                 )}
 
-                {/* WHY? Evidence Graph Expansion */}
+                {/* WHY? Per-finding evidence graph expansion */}
                 {isWhyActive && (
                   <div className="mt-3 border-t border-indigo-100 pt-3">
                     {isLoadingGraph && (
                       <div className="flex items-center justify-center py-6">
                         <Loader2 className="w-5 h-5 text-indigo-500 animate-spin mr-2" />
-                        <span className="text-xs text-slate-500">Building evidence graph...</span>
+                        <span className="text-xs text-slate-500">Building evidence graph for this finding...</span>
                       </div>
                     )}
                     {graphError && (
@@ -881,26 +1072,25 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
                         {graphError}
                       </div>
                     )}
-                    {evidenceGraph && !isLoadingGraph && (
+                    {whyEvidenceGraph && !isLoadingGraph && (
                       <div className="space-y-3">
-                        {evidenceGraph.nodes.length > 0 ? (
+                        {whyEvidenceGraph.nodes.length > 0 ? (
                           <>
                             <div className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider">
-                              Evidence Graph ({evidenceGraph.nodes.length} entities, {evidenceGraph.edges.length} relationships)
+                              Finding Evidence ({whyEvidenceGraph.nodes.length} entities, {whyEvidenceGraph.edges.length} relationships)
                             </div>
-                            <EvidenceGraph
-                              nodes={evidenceGraph.nodes}
-                              edges={evidenceGraph.edges}
-                              compact={true}
-                              selectedEdgeId={selectedEdge?.id}
-                              onEdgeClick={(edge) => { setSelectedEdge(edge); setSelectedNode(null); }}
-                              onNodeClick={(node) => { setSelectedNode(node); setSelectedEdge(null); }}
-                            />
+                            <div className="h-[280px] bg-white rounded-lg border border-slate-200 overflow-hidden">
+                              <EvidenceGraph
+                                nodes={whyEvidenceGraph.nodes}
+                                edges={whyEvidenceGraph.edges}
+                                compact={true}
+                              />
+                            </div>
                             <EvidencePanel
                               edge={selectedEdge}
                               node={selectedNode}
-                              allNodes={evidenceGraph.nodes}
-                              allEdges={evidenceGraph.edges}
+                              allNodes={whyEvidenceGraph.nodes}
+                              allEdges={whyEvidenceGraph.edges}
                               onClose={() => { setSelectedEdge(null); setSelectedNode(null); }}
                               onViewRecord={handleViewRecord}
                             />
@@ -918,6 +1108,7 @@ function InvestigationFindings({ findings, stats, plan }: { findings: any[]; sta
             );
           })}
 
+          {/* ── 5. Engine Errors ── */}
           {errors && errors.data?.errors?.length > 0 && (
             <div className="p-2 bg-amber-50 rounded-lg border border-amber-200">
               <div className="text-[10px] font-bold text-amber-700 mb-1">Engine Errors</div>
