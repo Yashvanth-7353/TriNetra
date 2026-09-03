@@ -26,6 +26,8 @@ from groq import Groq
 from typing import Optional
 
 from engines.location_resolver import LocationResolver
+from engines.exact_case import ExactCaseResolver
+from engines.intent_classifier import DeterministicIntentClassifier
 
 
 # ════════════════════════════════════════════════════════════════
@@ -61,12 +63,32 @@ class InvestigationPlanner:
         r"\bconnected (cases|suspects|accused|people|offenders)\b",
         r"\blinked (cases|suspects|accused)\b", r"\bsame (suspects?|accused|group|gang|pattern)\b",
         r"\bany of (these|those|them)\b", r"\bmastermind\b", r"\bringleader\b",
+        r"\bfinancial trail\b", r"\bthis investigation\b", r"\bthe investigation\b",
+        r"\btrace (the )?money\b", r"\bfollow the money\b",
+        r"\bconnected to (it|him|her|them|this|that)\b",
+        r"\blinked to (it|him|her|them|this|that)\b",
+        r"\bare (they|any of them|these|those) (connected|linked|related|involved)\b",
+        r"\bshow (the )?(financial )?(trail|transactions?|accounts?|money)\b",
     ]
 
     def _is_followup(self, request_text: str) -> bool:
-        """Detects whether a request refers back to a previous investigation."""
+        """Detects whether a request refers back to a previous investigation.
+
+        Uses both the keyword patterns and the deterministic classifier's
+        follow-up-reference rules, but NEVER treats a question that defines a
+        brand-new scope (new FIR, crime, district, or time window) as a
+        follow-up — a new scope starts a new investigation.
+        """
         lower = request_text.lower()
-        return any(re.search(p, lower) for p in self.FOLLOWUP_PATTERNS)
+        if any(re.search(p, lower) for p in self.FOLLOWUP_PATTERNS):
+            return True
+        try:
+            classifier = DeterministicIntentClassifier()
+            if classifier.is_followup_reference(request_text):
+                return not classifier.defines_new_scope(request_text)
+        except Exception:
+            pass
+        return False
 
     def create_plan(self, request_text: str, conversation_history: list = None,
                     investigation_context: dict = None) -> dict:
@@ -83,8 +105,22 @@ class InvestigationPlanner:
             entities: dict (case_ids, accused_ids, etc.)
             summary: str (brief description of what the plan will do)
         """
+        # ── Central deterministic routing policy ──
+        # Runs FIRST. The rule engine decides intent + engines; the LLM below
+        # only enriches scope/entities. Deterministic matches always override
+        # LLM engine choices (applied after the LLM call), so the LLM can
+        # never route "similar modus operandi" to factual lookup or "recurring
+        # pattern" to trend analysis.
+        det = DeterministicIntentClassifier().classify(
+            request_text, investigation_context=investigation_context
+        )
+
         if not self.groq_client:
-            return self._fallback_plan(request_text, investigation_context=investigation_context)
+            plan = self._fallback_plan(request_text, investigation_context=investigation_context)
+            self._apply_deterministic_intent(plan, det, request_text)
+            self._deterministic_case_lookup_correction(request_text, plan)
+            self._merge_investigation_context(plan, investigation_context, request_text)
+            return plan
 
         history_context = ""
         if conversation_history:
@@ -254,6 +290,12 @@ HARD RULES:
                 if key in plan["entities"]:
                     plan["entities"][key] = [int(x) for x in plan["entities"][key] if x]
 
+            # ── Deterministic intent override (central routing policy) ──
+            # The rule engine's intent/engine choice REPLACES whatever the LLM
+            # picked. The LLM keeps its extracted scope filters and entities,
+            # but never its engine selection for matched intents.
+            self._apply_deterministic_intent(plan, det, request_text)
+
             # ── Deterministic factual-query correction ──
             # "last cases / latest cases / recent cases registered in <place>"
             # are record-retrieval questions. If the LLM mislabeled one (e.g.
@@ -269,8 +311,143 @@ HARD RULES:
             return plan
 
         except Exception as e:
-            return self._fallback_plan(request_text, error=str(e),
+            plan = self._fallback_plan(request_text, error=str(e),
                                        investigation_context=investigation_context)
+            self._apply_deterministic_intent(plan, det, request_text)
+            self._merge_investigation_context(plan, investigation_context, request_text)
+            return plan
+
+    def _apply_deterministic_intent(self, plan: dict, det: dict, request_text: str) -> None:
+        """
+        Applies the central deterministic routing policy to a plan.
+
+        When the rule engine matched an intent, its intent label and engine
+        list REPLACE the LLM's choices (the LLM never picks engines for
+        matched intents). The LLM-extracted filters/entities are kept.
+        Entity requirements (requires_context, entity_type, entity_ids) are
+        stamped so the orchestrator's scope firewall can enforce them.
+        """
+        if not det or not det.get("matched"):
+            plan.setdefault("requires_context", False)
+            plan.setdefault("entity_type", None)
+            plan.setdefault("entity_ids", [])
+            plan.setdefault("routing", {"deterministic": False})
+            return
+
+        plan["intent"] = det["intent"]
+        plan["intents"] = det.get("intents", [det["intent"]])
+        plan["engines"] = det["engines"]
+        plan["requires_context"] = det.get("requires_context", False)
+        plan["entity_type"] = det.get("entity_type")
+        plan["entity_ids"] = det.get("entity_ids", [])
+        plan["routing"] = {
+            "deterministic": True,
+            "reasoning": det.get("reasoning", ""),
+            "intent_label": DeterministicIntentClassifier().describe(det["intent"]),
+            "engines": det["engines"],
+            "requires_context": det.get("requires_context", False),
+        }
+
+        filters = plan.setdefault("filters", {})
+
+        # ── Deterministic scope extraction ──
+        # Scope (crime / district) is resolved from the REQUEST TEXT itself, so
+        # a misbehaving LLM can never drop the investigator's stated scope.
+        # This runs for every matched intent: pattern/trend/case-search/similarity
+        # questions carry their crime+location in the query text.
+        #
+        # SAFETY: entity-centric intents (financial/network/risk) NEVER get a
+        # crime filter inferred from their own marker words — "show the financial
+        # trail" must never gain an "Online Financial Fraud" filter, and a bare
+        # financial/network follow-up must never invent any scope. A crime is
+        # only extracted for these intents when the query ALSO names case
+        # records AND the matched crime phrase is not derived solely from
+        # intent-marker tokens (e.g. "financial trail for burglary cases").
+        try:
+            entity_centric_det = det.get("intent") in (
+                "financial_analysis", "criminal_network", "risk_analysis", "case_similarity"
+            )
+            infer_scope = True
+            if entity_centric_det:
+                ql = request_text.lower()
+                has_case_ref = bool(re.search(r"\b(cases?|firs?|records?|registered)\b", ql))
+                infer_scope = has_case_ref
+            if infer_scope:
+                if not filters.get("crime_category") and not filters.get("crime_sub_head_id"):
+                    crime = LocationResolver().best_crime_match(request_text)
+                    if crime.get("matched") and crime.get("phrase") \
+                            and self._scope_crime_phrase_ok(crime, request_text, entity_centric_det):
+                        filters["crime_category"] = crime["phrase"]
+                if not filters.get("district_name") and not filters.get("district_id"):
+                    loc = LocationResolver().resolve(request_text)
+                    if loc.get("matched") and loc.get("district_name"):
+                        filters["district_name"] = loc["district_name"]
+        except Exception:
+            pass
+
+        # Narrative / MO phrase: used by the RAG engine and by the keyword
+        # case search so MO-similarity questions search the actual method
+        # described ("break-in using forced entry"), never a broad list.
+        mo_phrase = det.get("mo_phrase")
+        if mo_phrase:
+            if not filters.get("search_keyword"):
+                filters["search_keyword"] = mo_phrase
+            filters["mo_phrase"] = mo_phrase
+            # Seed the crime scope when the MO phrase names a crime
+            # ("break-in" → Burglary) so pattern detection runs scoped.
+            if not filters.get("crime_category"):
+                try:
+                    crime = LocationResolver().best_crime_match(mo_phrase)
+                except Exception:
+                    crime = {}
+                if crime.get("matched") and crime.get("phrase"):
+                    filters["crime_category"] = crime["phrase"]
+
+        # Stamp the discovered/required entities the orchestrator must use
+        if det.get("entity_ids"):
+            entities = plan.setdefault("entities", {"case_ids": [], "accused_ids": []})
+            if det.get("entity_type") == "case":
+                for eid in det["entity_ids"]:
+                    if eid not in entities["case_ids"]:
+                        entities["case_ids"].append(int(eid))
+            elif det.get("entity_type") == "accused":
+                for eid in det["entity_ids"]:
+                    if eid not in entities["accused_ids"]:
+                        entities["accused_ids"].append(int(eid))
+
+    # Words that are intent MARKERS for entity-centric analysis — a crime match
+    # derived ONLY from these tokens (e.g. "financial" → "Online Financial
+    # Fraud") is an invented scope, not a stated crime.
+    _ENTITY_MARKER_TOKENS = {
+        "financial", "financially", "money", "monetary", "transaction", "transactions",
+        "account", "accounts", "bank", "banking", "payment", "payments", "transfer",
+        "transfers", "network", "connection", "connected", "link", "linked", "links",
+        "relationship", "relationships", "risk", "offend", "offender", "reoffend",
+        "suspect", "suspects", "accused", "trail", "trace", "follow", "show",
+        "identify", "connected", "associated", "association", "fraud", "cyber", "online",
+    }
+
+    def _scope_crime_phrase_ok(self, crime: dict, request_text: str,
+                               entity_centric: bool) -> bool:
+        """
+        Rejects crime matches that are merely intent-marker coincidences for
+        entity-centric intents. For non-entity-centric intents (pattern, trend,
+        case search, narrative similarity) any real crime phrase is accepted.
+        """
+        if not entity_centric:
+            return True
+        phrase = (crime.get("phrase") or "").lower()
+        norm_phrase = re.sub(r"[^a-z0-9 ]", "", phrase)
+        tokens = set(norm_phrase.split())
+        q_tokens = set(re.sub(r"[^a-z0-9 ]", " ", request_text.lower()).split())
+        overlap = tokens & q_tokens
+        if not overlap:
+            return False
+        # If every overlapping token is an entity-intent marker, the match is a
+        # coincidence ("financial" → "Online Financial Fraud"), not a stated
+        # crime. A stated crime contributes at least one non-marker token
+        # ("burglary", "theft", "vehicle", ...).
+        return any(t not in self._ENTITY_MARKER_TOKENS for t in overlap)
 
     def _deterministic_case_lookup_correction(self, request_text: str, plan: dict) -> None:
         """
@@ -297,7 +474,10 @@ HARD RULES:
         if not has_case_kw or not (recency or listing):
             return
 
-        plan["intent"] = "case_lookup"
+        # The deterministic classifier may already have labelled this as
+        # case_search — both are record-retrieval; keep the deterministic label.
+        if not (plan.get("routing") or {}).get("deterministic"):
+            plan["intent"] = "case_lookup"
         plan["investigation_type"] = "specific_case_analysis"
         engines = plan.setdefault("engines", [])
         if "case_query" not in engines:
@@ -394,20 +574,39 @@ HARD RULES:
             "time_window": filters.get("time_window"),
         }
 
+        # 5. A follow-up that resolved to an entity-centric intent (financial /
+        #    network / similarity) with discovered context entities is satisfied
+        #    by that context — mark requires_context=False so the scope firewall
+        #    knows the requirement was met.
+        if discovered_cases or discovered_accused:
+            if plan.get("requires_context"):
+                plan["requires_context_satisfied_by_context"] = True
+                plan["requires_context"] = False
+
         # 4. If the follow-up is about people/connections/finance, add the
         #    relevant engines deterministically (covers "which ones are connected?"
         #    when the LLM returns only case_query).
+        #
+        #    When the deterministic routing policy already picked the engines,
+        #    that selection is authoritative — never append extra engines here.
+        if (plan.get("routing") or {}).get("deterministic"):
+            return
         summary = (plan.get("summary") or "").lower()
         engines = plan["engines"]
-        if any(k in summary for k in ("connect", "link", "network", "relationship", "money", "financ")):
+        intent = plan.get("intent", "")
+        if any(k in summary for k in ("connect", "link", "network", "relationship", "money", "financ")) \
+                or intent in ("criminal_network", "financial_analysis", "evidence_graph"):
             if discovered_accused and "criminal_network" not in engines:
                 engines.append("criminal_network")
-            if "financial" in summary and "financial_intelligence" not in engines:
+            if ("financial" in summary or intent == "financial_analysis") \
+                    and "financial_intelligence" not in engines:
                 engines.append("financial_intelligence")
-        if any(k in summary for k in ("these cases", "those cases", "similar", "related", "repeat")):
-            if "case_similarity" not in engines and discovered_cases:
+        if any(k in summary for k in ("these cases", "those cases", "similar", "related", "repeat")) \
+                or intent in ("case_similarity", "narrative_similarity", "pattern_detection"):
+            if "case_similarity" not in engines and (discovered_cases or intent == "narrative_similarity"):
                 engines.append("case_similarity")
-            if "pattern" in summary and "pattern_detection" not in engines:
+            if ("pattern" in summary or intent in ("pattern_detection", "narrative_similarity")) \
+                    and "pattern_detection" not in engines:
                 engines.append("pattern_detection")
         plan["engines"] = [e for e in engines if e in self.VALID_ENGINES]
 
@@ -657,17 +856,128 @@ class InvestigationOrchestrator:
 
         # Build a human-readable scope summary for the frontend INVESTIGATION SCOPE UI
         resolved_scope = self._build_resolved_scope(filters)
-        plan["resolved_scope"] = resolved_scope
+
+        # ── Entity-first exact case scope ──
+        # When the question resolved to a specific FIR/case, the scope display
+        # must show THAT record (never "State-wide / All time / 2896 records").
+        exact_case = plan.get("exact_case")
+        if exact_case and exact_case.get("found"):
+            ec = exact_case
+            rs = plan.get("resolved_scope", resolved_scope)
+            rs["status"] = "verified" if ec.get("record") else "failed"
+            rs["crime"] = {
+                "requested": None,
+                "resolved_name": ec.get("crime_sub_head") or ec.get("crime_head"),
+                "resolved": True,
+            }
+            rs["district"] = {
+                "requested": None,
+                "resolved_name": ec.get("district"),
+                "resolved": bool(ec.get("district")),
+            }
+            rs["station"] = {
+                "requested": None,
+                "resolved_names": [ec["station"]] if ec.get("station") else [],
+                "resolved": bool(ec.get("station")),
+            }
+            rs["time_window"] = {
+                "requested": None,
+                "label": ec.get("registered") or "Exact record",
+                "resolved": True,
+            }
+            rs["exact_case"] = {
+                "record_found": True,
+                "identifier": ec.get("identifier"),
+                "crime_no": ec.get("crime_no"),
+                "case_master_id": ec.get("case_master_id"),
+                "crime": ec.get("crime_sub_head") or ec.get("crime_head"),
+                "location": ec.get("district"),
+                "station": ec.get("station"),
+                "registered": ec.get("registered"),
+                "status": ec.get("status"),
+            }
+            plan["resolved_scope"] = rs
+        elif exact_case and not exact_case.get("found") and exact_case.get("identifier"):
+            rs = plan.get("resolved_scope", resolved_scope)
+            rs["status"] = "failed"
+            rs["exact_case"] = {
+                "record_found": False,
+                "identifier": exact_case.get("identifier"),
+                "crime": None,
+                "location": None,
+                "station": None,
+                "registered": None,
+                "status": None,
+            }
+            plan["resolved_scope"] = rs
+        else:
+            plan["resolved_scope"] = resolved_scope
 
         entities = plan.get("entities", {})
         engines_to_run = plan.get("engines", [])
+        intent = plan.get("intent", "")
 
         # Track discovered entities for chaining
         discovered_cases = set(entities.get("case_ids", []))
         discovered_accused = set(entities.get("accused_ids", []))
 
-        # Phase 1: Case query (feeds into subsequent engines)
-        if "case_query" in engines_to_run:
+        # ── SCOPE FIREWALL (safety gate, runs before ANY engine) ──
+        # Rule: no entity → no entity traversal; no scope → no scoped query.
+        # An entity-centric intent (financial / network / risk / similarity)
+        # that has NEITHER an explicit entity (query or previous context) NOR
+        # an explicit scoped case set to establish must STOP — it never falls
+        # back to "latest 50 records" or a state-wide search.
+        has_scope_filters = bool(
+            filters.get("crime_sub_head_id") or filters.get("crime_head_id")
+            or filters.get("district_id") or filters.get("unit_ids")
+            or filters.get("date_from") or filters.get("date_to")
+        )
+        has_entities = bool(discovered_cases or discovered_accused)
+        entity_centric = intent in (
+            "financial_analysis", "criminal_network", "risk_analysis", "case_similarity"
+        )
+        if entity_centric and not has_entities and not has_scope_filters:
+            evidence_items.append(self._build_context_required_item(intent, filters))
+            engines_to_run = []
+        elif entity_centric and has_entities and not has_scope_filters:
+            # Entities (from query or previous context) satisfy the request.
+            # A case_query without any scope filter would return an unrelated
+            # state-wide list — never allowed for entity-centric requests.
+            engines_to_run = [e for e in engines_to_run if e != "case_query"]
+        elif "case_query" in engines_to_run and not has_scope_filters \
+                and not filters.get("search_keyword") and not has_entities \
+                and intent not in ("case_search", "general_investigation", "exact_case_lookup"):
+            # Analysis intents never run an implicit broad case list.
+            engines_to_run = [e for e in engines_to_run if e != "case_query"]
+
+        # ── Phase 1: Case retrieval ──
+        if exact_case and exact_case.get("found") and exact_case.get("record"):
+            # Entity-first: retrieve exactly the resolved case. General scope
+            # filters never apply; crime words were verification, not filters.
+            cid = exact_case.get("case_master_id")
+            if cid:
+                discovered_cases.add(int(cid))
+            for aid in exact_case.get("accused_ids", []) or []:
+                discovered_accused.add(int(aid))
+            evidence_items.append(self._build_exact_case_item(exact_case))
+            # Analysis engines keep their role off the discovered entity; broad
+            # search engines that would re-run a filtered list are dropped.
+            engines_to_run = [
+                e for e in engines_to_run
+                if e not in ("case_query", "pattern_detection", "trend_analysis", "narrative_rag")
+            ]
+        elif exact_case and not exact_case.get("found") and exact_case.get("identifier"):
+            # Invalid exact identifier — NEVER fall back to a broad search.
+            identifier = exact_case.get("identifier")
+            evidence_items.append({
+                "engine": "case_query",
+                "type": "scope_error",
+                "data": {"error": f"FIR/Case {identifier} not found"},
+                "signal": f"I couldn't find FIR/Case {identifier} in the authorized records.",
+                "strength": "none",
+            })
+            engines_to_run = []
+        elif "case_query" in engines_to_run:
             items = self._run_case_query(
                 filters, rbac_filter, case_explorer_engine, nl2sql_engine
             )
@@ -686,7 +996,7 @@ class InvestigationOrchestrator:
 
         # Phase 3: Pattern detection (independent)
         if "pattern_detection" in engines_to_run:
-            items = self._run_pattern_detection(filters, pattern_engine)
+            items = self._run_pattern_detection(filters, pattern_engine, rbac_filter)
             evidence_items.extend(items)
 
         # Phase 4: Trend analysis (independent)
@@ -737,7 +1047,14 @@ class InvestigationOrchestrator:
             evidence_items.extend(items)
 
         # Record which engines actually ran and succeeded for the scope UI
-        executed = sorted({item["engine"] for item in evidence_items if item["type"] != "error" and item["type"] != "scope_error"})
+        # (context_required / zero_result / errors are NOT "executed" findings)
+        executed = sorted({
+            item["engine"] for item in evidence_items
+            if item["type"] not in ("error", "scope_error", "context_required", "zero_result")
+        })
+        if exact_case and exact_case.get("found"):
+            # Label the route precisely for the UI / debugging
+            executed = sorted(set(executed) | {"exact_case_lookup"})
         attempted = sorted(set(engines_to_run))
         resolved_scope = plan.get("resolved_scope", {})
         resolved_scope["engines"] = executed
@@ -745,6 +1062,55 @@ class InvestigationOrchestrator:
         plan["resolved_scope"] = resolved_scope
 
         return evidence_items
+
+    def _build_exact_case_item(self, exact_case: dict) -> dict:
+        """Evidence item containing exactly the resolved single case record."""
+        record = exact_case.get("record") or {}
+        case_row = {
+            "casemasterid": record.get("casemasterid") or exact_case.get("case_master_id"),
+            "crimeno": record.get("crimeno") or exact_case.get("crime_no"),
+            "crimeregistereddate": record.get("crimeregistereddate") or exact_case.get("registered"),
+            "districtname": record.get("districtname") or exact_case.get("district"),
+            "police_station": record.get("police_station") or exact_case.get("station"),
+            "casestatusname": record.get("casestatusname") or exact_case.get("status"),
+            "crime_sub_head": record.get("crime_sub_head") or exact_case.get("crime_sub_head"),
+            "crime_head": record.get("crime_head") or exact_case.get("crime_head"),
+        }
+        case_row = {k: v for k, v in case_row.items() if v is not None}
+        identifier = case_row.get("crimeno") or exact_case.get("identifier") or ""
+        return {
+            "engine": "case_query",
+            "type": "case_list",
+            "data": {"cases": [case_row], "total_count": 1},
+            "signal": f"Resolved FIR {identifier} to one authorized case record",
+            "strength": "strong",
+        }
+
+    def _build_context_required_item(self, intent: str, filters: dict) -> dict:
+        """
+        Evidence item for entity-centric requests with NO resolvable entity and
+        NO scoped case set. The response builder turns this into an explicit
+        "Context Required" answer — no engine is run, no broad list is returned.
+        """
+        hints = []
+        if intent in ("financial_analysis",):
+            hints = ["Please provide a FIR/case number or refer to a specific investigation."]
+        elif intent in ("criminal_network", "risk_analysis"):
+            hints = ["Please provide a specific accused/person, FIR/case number, or investigation context."]
+        elif intent == "case_similarity":
+            hints = ["Please provide the specific FIR/case number to compare against."]
+        hint_text = " " + " ".join(hints) if hints else ""
+        message = (
+            "No specific investigation, case, suspect, or account is currently available"
+            f" to trace.{hint_text}"
+        )
+        return {
+            "engine": "case_query",
+            "type": "context_required",
+            "data": {"intent": intent, "error": message},
+            "signal": message,
+            "strength": "none",
+        }
 
     def _run_case_query(self, filters: dict, rbac_filter: str,
                         case_explorer_engine, nl2sql_engine) -> list:
@@ -843,7 +1209,9 @@ class InvestigationOrchestrator:
         """Execute RAG semantic search. Returns evidence items."""
         items = []
         try:
-            keyword = filters.get("search_keyword")
+            # Prefer the explicitly extracted MO/narrative phrase
+            # ("break-in using forced entry"); fall back to the search keyword.
+            keyword = filters.get("mo_phrase") or filters.get("search_keyword")
             if not keyword:
                 return items
 
@@ -855,6 +1223,7 @@ class InvestigationOrchestrator:
                     "data": {
                         "answer": result.get("answer", ""),
                         "citations": result.get("citations", []),
+                        "similarity_basis": keyword,
                     },
                     "signal": f"RAG found {len(result['citations'])} narratively similar FIRs",
                     "strength": "strong" if len(result["citations"]) >= 3 else "moderate",
@@ -869,7 +1238,7 @@ class InvestigationOrchestrator:
             })
         return items
 
-    def _run_pattern_detection(self, filters: dict, pattern_engine) -> list:
+    def _run_pattern_detection(self, filters: dict, pattern_engine, rbac_filter: str = "1=1") -> list:
         """Execute MO-based pattern detection with investigation scope. Returns evidence items."""
         items = []
         try:
@@ -918,26 +1287,40 @@ class InvestigationOrchestrator:
                 # No specific scope requested — use general emerging patterns
                 result = pattern_engine.get_emerging_patterns()
 
-            if "error" not in result and result.get("patterns"):
-                patterns = result["patterns"]
+            if "error" in result:
+                # Engine failed — a distinct outcome from "no pattern found".
+                items.append({
+                    "engine": "pattern_detection",
+                    "type": "error",
+                    "data": {"error": result["error"]},
+                    "signal": f"Pattern detection engine error: {str(result['error'])[:100]}",
+                    "strength": "none",
+                })
+                return items
 
-                # Additional district filter if using unscoped method
-                district_name = filters.get("district_name")
-                if district_name and not district_id:
-                    patterns = [p for p in patterns
-                                if district_name.lower() in
-                                " ".join([str(d) for d in p.get("districts", [])]).lower()
-                                or any(district_name.lower() in c.get("district", "").lower()
-                                       for c in p.get("cases", []))]
+            patterns = result.get("patterns") or []
+            # Additional district filter if using unscoped method
+            district_name = filters.get("district_name")
+            if district_name and not district_id:
+                patterns = [p for p in patterns
+                            if district_name.lower() in
+                            " ".join([str(d) for d in p.get("districts", [])]).lower()
+                            or any(district_name.lower() in c.get("district", "").lower()
+                                   for c in p.get("cases", []))]
 
-                if patterns:
-                    items.append({
-                        "engine": "pattern_detection",
-                        "type": "patterns",
-                        "data": {"patterns": patterns},
-                        "signal": f"Detected {len(patterns)} emerging crime pattern clusters",
-                        "strength": "strong" if len(patterns) >= 3 else "moderate" if len(patterns) >= 1 else "limited",
-                    })
+            if patterns:
+                items.append({
+                    "engine": "pattern_detection",
+                    "type": "patterns",
+                    "data": {"patterns": patterns},
+                    "signal": f"Detected {len(patterns)} emerging crime pattern clusters",
+                    "strength": "strong" if len(patterns) >= 3 else "moderate" if len(patterns) >= 1 else "limited",
+                })
+            else:
+                # Zero-result pattern analysis: report the scope that was
+                # examined and the absence of patterns — never a fake
+                # visualization and never a broad case list.
+                items.append(self._build_zero_pattern_item(filters, rbac_filter))
         except Exception as e:
             items.append({
                 "engine": "pattern_detection",
@@ -948,38 +1331,144 @@ class InvestigationOrchestrator:
             })
         return items
 
+    def _build_zero_pattern_item(self, filters: dict, rbac_filter: str = "1=1") -> dict:
+        """
+        Zero-result pattern evidence: reports the scope actually examined and
+        the number of cases reviewed, so the response can state "no recurring
+        pattern was detected" with the honest scope — never "0 data points"
+        and never a substituted case list.
+        """
+        scope_parts = []
+        if filters.get("crime_sub_head_name") or filters.get("crime_head_name"):
+            scope_parts.append(filters.get("crime_sub_head_name") or filters.get("crime_head_name"))
+        if filters.get("district_name_resolved") or filters.get("district_name"):
+            scope_parts.append(filters.get("district_name_resolved") or filters.get("district_name"))
+        scope_text = ", ".join(scope_parts) or "the requested scope"
+        time_label = filters.get("time_window_label") or "recent period"
+        cases_examined = self._scope_case_count(filters, rbac_filter)
+        return {
+            "engine": "pattern_detection",
+            "type": "zero_result",
+            "data": {
+                "zero_result": True,
+                "category": filters.get("crime_sub_head_name") or filters.get("crime_head_name") or filters.get("crime_category"),
+                "location": filters.get("district_name_resolved") or filters.get("district_name"),
+                "time_label": time_label,
+                "cases_examined": cases_examined,
+            },
+            "signal": f"No recurring pattern detected within {scope_text} ({time_label}).",
+            "strength": "none",
+        }
+
+    def _scope_case_count(self, filters: dict, rbac_filter: str = "1=1"):
+        """Counts the cases within the resolved scope (used by zero-result
+        pattern reports). Returns an int or None when not computable."""
+        if not self.db_url:
+            return None
+        conds = []
+        params = []
+        if filters.get("crime_sub_head_id"):
+            conds.append("cm.CrimeMinorHeadID = %s")
+            params.append(filters["crime_sub_head_id"])
+        elif filters.get("crime_head_id"):
+            conds.append("cm.CrimeMajorHeadID = %s")
+            params.append(filters["crime_head_id"])
+        if filters.get("district_id"):
+            conds.append("u.DistrictID = %s")
+            params.append(filters["district_id"])
+        if filters.get("date_from"):
+            conds.append("cm.CrimeRegisteredDate >= %s")
+            params.append(filters["date_from"])
+        if filters.get("date_to"):
+            conds.append("cm.CrimeRegisteredDate <= %s")
+            params.append(filters["date_to"])
+        if rbac_filter and rbac_filter.strip() not in ("", "1=1") and ";" not in rbac_filter and "--" not in rbac_filter:
+            conds.append(f"({rbac_filter})")
+        if not conds:
+            return None
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            sql = ("SELECT COUNT(*) FROM CaseMaster cm "
+                   "JOIN Unit u ON cm.PoliceStationID = u.UnitID WHERE " + " AND ".join(conds))
+            cur.execute(sql, params)
+            count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return int(count)
+        except Exception:
+            return None
+
     def _run_trend_analysis(self, filters: dict, rbac_filter: str, nl2sql_engine) -> list:
-        """Execute temporal trend analysis via NL2SQL. Returns evidence items."""
+        """Execute temporal trend analysis via NL2SQL, with a deterministic SQL
+        fallback so a trend question never returns "0 data points" when the
+        NL2SQL layer fails. Returns evidence items."""
         items = []
         try:
             trend_instruction = " FORCE TREND FORMAT: Group by month. Select exactly two columns: 'month' (e.g. TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM')) and 'count'."
-            district_name = filters.get("district_name")
+            district_name = filters.get("district_name") or filters.get("district_name_resolved")
             crime_category = filters.get("crime_category")
 
-            query_text = "Show the crime registration trend over the last 12 months"
+            months = 12
+            if filters.get("date_from"):
+                try:
+                    cutoff = datetime.strptime(filters["date_from"], "%Y-%m-%d")
+                    days = (datetime.now() - cutoff).days
+                    months = max(1, min(int(round(days / 30)), 60))
+                except Exception:
+                    months = 12
+
+            query_text = f"Show the crime registration trend over the last {months} months"
             if district_name:
                 query_text += f" in {district_name}"
             if crime_category:
                 query_text += f" for {crime_category}"
 
-            generated_sql = nl2sql_engine.generate_sql(
-                query_text + trend_instruction, rbac_filter=rbac_filter
-            )
-            exec_result = nl2sql_engine.validate_and_execute(generated_sql, query_text)
+            trend_data = None
+            generated_sql = None
+            try:
+                generated_sql = nl2sql_engine.generate_sql(
+                    query_text + trend_instruction, rbac_filter=rbac_filter
+                )
+                exec_result = nl2sql_engine.validate_and_execute(generated_sql, query_text)
+                if "error" not in exec_result and exec_result.get("rows"):
+                    rows = []
+                    for row in exec_result["rows"]:
+                        keys = list(row.keys())
+                        if len(keys) >= 2:
+                            rows.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
+                    if rows:
+                        trend_data = rows
+            except Exception:
+                trend_data = None
 
-            if "error" not in exec_result and exec_result.get("rows"):
-                trend_data = []
-                for row in exec_result["rows"]:
-                    keys = list(row.keys())
-                    if len(keys) >= 2:
-                        trend_data.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
+            if trend_data is None:
+                # Deterministic fallback: aggregate by month with the resolved
+                # scope filters and the mandatory RBAC condition.
+                trend_data = self._deterministic_trend(filters, rbac_filter, months)
 
+            if trend_data:
                 items.append({
                     "engine": "trend_analysis",
                     "type": "trend",
                     "data": {"trend_data": trend_data},
                     "signal": f"Analyzed {len(trend_data)} months of crime trend data",
                     "strength": "strong" if len(trend_data) >= 6 else "moderate",
+                })
+            else:
+                items.append({
+                    "engine": "trend_analysis",
+                    "type": "zero_result",
+                    "data": {
+                        "zero_result": True,
+                        "scope": {
+                            "crime": filters.get("crime_category"),
+                            "district": filters.get("district_name_resolved") or filters.get("district_name"),
+                            "months": months,
+                        },
+                    },
+                    "signal": "No trend data available for the requested scope.",
+                    "strength": "none",
                 })
         except Exception as e:
             items.append({
@@ -990,6 +1479,50 @@ class InvestigationOrchestrator:
                 "strength": "none",
             })
         return items
+
+    def _deterministic_trend(self, filters: dict, rbac_filter: str, months: int = 12) -> list:
+        """
+        Deterministic month-by-month case count aggregation using the resolved
+        scope filters. RBAC is always applied. Returns [{'month','count'}] or [].
+        """
+        if not self.db_url:
+            return []
+        conds = []
+        params = []
+        if filters.get("crime_sub_head_id"):
+            conds.append("cm.CrimeMinorHeadID = %s")
+            params.append(filters["crime_sub_head_id"])
+        elif filters.get("crime_head_id"):
+            conds.append("cm.CrimeMajorHeadID = %s")
+            params.append(filters["crime_head_id"])
+        if filters.get("district_id"):
+            conds.append("u.DistrictID = %s")
+            params.append(filters["district_id"])
+        if filters.get("unit_ids"):
+            conds.append("u.UnitID = ANY(%s)")
+            params.append(list(filters["unit_ids"]))
+        cutoff = (datetime.now() - timedelta(days=30 * months)).strftime("%Y-%m-%d")
+        conds.append("cm.CrimeRegisteredDate >= %s")
+        params.append(cutoff)
+        if rbac_filter and rbac_filter.strip() not in ("", "1=1") and ";" not in rbac_filter and "--" not in rbac_filter:
+            conds.append(f"({rbac_filter})")
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            sql = (
+                "SELECT TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') AS month, COUNT(*) AS count "
+                "FROM CaseMaster cm JOIN Unit u ON cm.PoliceStationID = u.UnitID "
+                "WHERE " + " AND ".join(conds) +
+                " GROUP BY TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM') "
+                "ORDER BY month ASC"
+            )
+            cur.execute(sql, params)
+            rows = [{"month": r[0], "count": int(r[1])} for r in cur.fetchall()]
+            cur.close()
+            conn.close()
+            return rows
+        except Exception:
+            return []
 
     def _run_case_similarity(self, case_ids: list, pattern_engine) -> list:
         """Run case similarity for each target case. Returns evidence items."""
@@ -1004,6 +1537,7 @@ class InvestigationOrchestrator:
                         "type": "similar_cases",
                         "data": {
                             "target_case_id": case_id,
+                            "reference_case_id": case_id,
                             "similar_cases": matches,
                         },
                         "signal": f"Case #{case_id}: {len(matches)} similar cases found (top score: {matches[0]['match_score']:.0f}%)" if matches else f"Case #{case_id}: no similar cases found",
@@ -1211,9 +1745,56 @@ class EvidenceFusion:
         findings = []
 
         # Separate successful items from errors and scope failures
-        successful = [e for e in evidence_items if e["type"] != "error" and e["type"] != "scope_error"]
+        successful = [e for e in evidence_items if e["type"] not in ("error", "scope_error", "context_required")]
         errors = [e for e in evidence_items if e["type"] == "error"]
         scope_failures = [e for e in evidence_items if e["type"] == "scope_error"]
+        context_required = [e for e in evidence_items if e["type"] == "context_required"]
+        zero_results = [e for e in evidence_items if e["type"] == "zero_result"]
+
+        # ── Context Required (entity-centric request with no resolvable
+        #    entity and no scoped case set) ──
+        # Surfaced as a first-class finding; the response builder turns it into
+        # the explicit "Context Required" answer. No engine ran — no broad list.
+        if context_required:
+            messages = list(dict.fromkeys(e["signal"] for e in context_required))
+            findings.append({
+                "category": "Context Required",
+                "description": "; ".join(messages) if messages else "No investigation context is available.",
+                "evidence_sources": [e["engine"] for e in context_required],
+                "data": {"context_errors": [{"engine": e["engine"], "message": e["signal"]} for e in context_required]},
+                "strength": "none",
+                "context_required": True,
+            })
+
+        # ── Zero-result findings ──
+        # Engines that ran correctly but found nothing (no pattern, no trend
+        # data) are reported as such with the scope they examined — never
+        # converted into a generic case list.
+        if zero_results:
+            for zr in zero_results:
+                data = zr.get("data", {}) or {}
+                engine_label = {
+                    "pattern_detection": "pattern",
+                    "trend_analysis": "trend",
+                }.get(zr.get("engine"), zr.get("engine"))
+                scope_desc = data.get("scope_description") or "the requested scope"
+                time_label = data.get("time_label") or ""
+                examined = data.get("cases_examined")
+                detail = zr.get("signal") or f"No {engine_label} detected in the requested scope."
+                if examined is not None:
+                    detail += f" Cases examined: {examined}."
+                if time_label:
+                    detail += f" Time period: {time_label}."
+                if data.get("location"):
+                    detail += f" Location: {data['location']}."
+                findings.append({
+                    "category": "No Matching Evidence",
+                    "description": detail,
+                    "evidence_sources": [zr.get("engine")],
+                    "data": data,
+                    "strength": "none",
+                    "zero_result": True,
+                })
 
         # ── Investigation Scope failure ──
         # An explicitly requested scope that could not be resolved is surfaced
@@ -1458,8 +2039,56 @@ class ResponseBuilder:
         # Extract structured evidence inventory from findings
         inventory = self._extract_evidence_inventory(findings)
 
-        # Build NL summary from evidence (inventory-aware)
-        summary_text = self._synthesize_summary(plan, findings, stats, inventory)
+        # ── Exact-case answers are deterministic, not LLM-synthesized ──
+        # A question that named a specific FIR/case was answered verbatim from
+        # the single database record (crime, status, station, registration date,
+        # verification yes/no). Feeding those facts back through the LLM risks
+        # dilution/loss, so the verified deterministic answer is used as-is.
+        exact_answer = None
+        exact_plan = plan.get("exact_case")
+        if exact_plan and exact_plan.get("answer"):
+            exact_answer = exact_plan["answer"]
+
+        plan_intent = plan.get("intent", "")
+        analysis_intents = {
+            "case_similarity", "narrative_similarity", "financial_analysis",
+            "criminal_network", "risk_analysis", "behaviour_analysis",
+            "evidence_graph", "next_best_action", "forecasting",
+            "pattern_detection", "trend_analysis",
+        }
+
+        if exact_answer and plan_intent not in analysis_intents:
+            # Pure exact-case question: the verified deterministic answer is
+            # used as-is — the LLM never re-derives these facts.
+            summary_text = exact_answer
+        else:
+            # ── Context Required is deterministic, never LLM-synthesized ──
+            # An entity-centric request (financial trail, network, risk) with
+            # no resolvable entity must return the explicit context-required
+            # message — and ZERO broad case queries already ran.
+            context_findings = [f for f in findings if f.get("context_required")]
+            if context_findings:
+                detail = context_findings[0].get("description") or (
+                    "No specific investigation, case, suspect, or account is currently "
+                    "available to trace."
+                )
+                intent = plan.get("intent", "")
+                label = DeterministicIntentClassifier().describe(intent)
+                summary_text = (
+                    f"{label}: Context Required\n\n"
+                    f"Status: Context Required\n\n"
+                    f"{detail}\n\n"
+                    f"Please provide a FIR/case number or start an investigation first."
+                )
+            else:
+                # Build NL summary from evidence (inventory-aware)
+                summary_text = self._synthesize_summary(plan, findings, stats, inventory)
+                # Analysis on top of an exact case ("find cases similar to FIR
+                # X"): keep the deterministic reference line so the verified
+                # record facts are never lost to synthesis.
+                if exact_answer and plan_intent in analysis_intents:
+                    reference_line = exact_answer.split("\n")[0]
+                    summary_text = f"Reference case: {reference_line}\n\n{summary_text}"
 
         # Collect all citations
         citations = self._collect_citations(findings)
@@ -1565,7 +2194,7 @@ class ResponseBuilder:
         scope = plan.get("resolved_scope") or {}
         for item in evidence_items:
             itype = item.get("type", "")
-            if itype in ("error", "scope_error"):
+            if itype in ("error", "scope_error", "context_required", "zero_result"):
                 continue
             engine = item.get("engine", "")
             data = item.get("data", {}) or {}
@@ -1652,10 +2281,52 @@ class ResponseBuilder:
         strength = stats.get("overall_strength", "none") or "none"
         scope = plan.get("resolved_scope") or {}
         scope_failed = scope.get("status") in ("failed", "partial")
+        exact_case = scope.get("exact_case")
+
+        # ── Exact case entity — ONE record, verified facts ──
+        if exact_case is not None:
+            identifier = exact_case.get("identifier") or exact_case.get("crime_no") or ""
+            if not exact_case.get("record_found"):
+                return {
+                    "finding": f"I couldn't find FIR/Case {identifier} in the authorized records.",
+                    "evidence": [],
+                    "why_it_matters": "No exact record matched the identifier within the authorized scope; no broader search was run.",
+                    "evidence_strength": "none",
+                    "has_sufficient_evidence": False,
+                    "uncertainty_note": "The requested FIR/Case identifier does not exist in the authorized records, so no records were returned and no broader scope was searched.",
+                    "scope_status": "failed",
+                    "primary_engines": ["exact_case_lookup"],
+                }
+            evidence = []
+            if exact_case.get("crime"):
+                evidence.append(f"Crime: {exact_case['crime']}")
+            if exact_case.get("location"):
+                evidence.append(f"Location: {exact_case['location']}")
+            if exact_case.get("station"):
+                evidence.append(f"Station: {exact_case['station']}")
+            if exact_case.get("registered"):
+                evidence.append(f"Registered: {exact_case['registered']}")
+            if exact_case.get("status"):
+                evidence.append(f"Status: {exact_case['status']}")
+            if exact_case.get("case_master_id"):
+                evidence.append(f"Case ID: {exact_case['case_master_id']}")
+            return {
+                "finding": f"FIR {identifier} is a {exact_case.get('crime') or 'case'} case.",
+                "evidence": evidence,
+                "why_it_matters": "The requested FIR was directly resolved to one authorized case record.",
+                "evidence_strength": "strong",
+                "has_sufficient_evidence": True,
+                "uncertainty_note": None,
+                "scope_status": "verified",
+                "primary_engines": ["exact_case_lookup"],
+            }
 
         # Find the strongest substantive finding (skip overview/errors/scope)
         substantive = [f for f in findings if f["category"] not in (
-            "Investigation Overview", "Engine Failures", "Investigation Scope")]
+            "Investigation Overview", "Engine Failures", "Investigation Scope",
+            "Context Required", "No Matching Evidence")]
+        context_required_findings = [f for f in findings if f.get("context_required")]
+        zero_result_findings = [f for f in findings if f.get("zero_result")]
         primary = None
         for f in substantive:
             if f.get("strength") in ("strong", "moderate"):
@@ -1668,6 +2339,10 @@ class ResponseBuilder:
         finding_text = ""
         if scope_failed:
             finding_text = "The requested investigation scope could not be resolved."
+        elif context_required_findings:
+            finding_text = "Context Required — no investigation entity is available."
+        elif zero_result_findings and not primary:
+            finding_text = zero_result_findings[0].get("description") or "No matching evidence was found in the requested scope."
         elif primary:
             data = primary.get("data", {}) or {}
             cat = primary.get("category", "")
@@ -1675,9 +2350,12 @@ class ResponseBuilder:
                 patterns = data.get("patterns", [])
                 n = len(patterns)
                 theme = patterns[0].get("theme") if patterns else ""
+                support = sum(p.get("case_count", 0) or 0 for p in patterns)
                 finding_text = f"{n} crime pattern cluster{'s' if n != 1 else ''} detected"
                 if theme:
                     finding_text += f": {theme}"
+                if support:
+                    finding_text += f" ({support} supporting case{'s' if support != 1 else ''})"
                 finding_text += "."
             elif cat == "Cases Identified":
                 n = len(data.get("cases", []))
@@ -1704,9 +2382,13 @@ class ResponseBuilder:
                     finding_text = f"{len(profiles)} offender profile{'s' if len(profiles) != 1 else ''} assessed; no high-risk scores."
             elif cat == "Related Cases (Similarity Analysis)":
                 n = len(data.get("similar_cases", []))
-                finding_text = f"{n} related case{'s' if n != 1 else ''} found through similarity analysis."
+                reference = data.get("reference_case_id")
+                ref_text = f" to FIR {reference}" if reference else ""
+                finding_text = f"{n} related case{'s' if n != 1 else ''} found through similarity analysis{ref_text}."
             elif cat == "Narrative Intelligence":
-                finding_text = f"{len(data.get('citations', []))} narratively similar FIR{'s' if len(data.get('citations', [])) != 1 else ''} identified."
+                basis = data.get("similarity_basis")
+                basis_text = f" (basis: {basis})" if basis else ""
+                finding_text = f"{len(data.get('citations', []))} narratively similar FIR{'s' if len(data.get('citations', [])) != 1 else ''} identified{basis_text}."
             else:
                 finding_text = primary.get("description", "")
         else:
@@ -1714,40 +2396,77 @@ class ResponseBuilder:
 
         # ── EVIDENCE bullets ──
         evidence_bullets = []
-        if inventory.get("has_case_evidence"):
-            cn = " ".join(inventory.get("crime_nos", [])[:2])
-            bullet = f"{inventory.get('total_cases', 0)} relevant case record{'s' if inventory.get('total_cases', 0) != 1 else ''}"
-            if cn:
-                bullet += f" — FIR {cn}"
-            if inventory.get("districts"):
-                bullet += f" · {', '.join(inventory['districts'][:2])}"
-            evidence_bullets.append(bullet + ".")
-        if inventory.get("has_pattern_evidence"):
-            mos = ", ".join(f"'{m}'" for m in inventory.get("mo_tags", [])[:3])
-            bullet = f"{inventory.get('total_patterns', 0)} pattern cluster{'s' if inventory.get('total_patterns', 0) != 1 else ''}"
-            if mos:
-                bullet += f" sharing MO {mos}"
-            evidence_bullets.append(bullet + ".")
-        if inventory.get("has_accused_evidence"):
-            aids = ", ".join(str(a) for a in inventory.get("accused_ids", [])[:5])
-            evidence_bullets.append(f"{len(inventory.get('accused_ids', []))} accused identified (IDs: {aids}).")
-        if inventory.get("has_financial_evidence"):
-            bullet = f"{inventory.get('total_financial_transactions', 0)} transactions"
-            if inventory.get("total_cross_case_links", 0):
-                bullet += f" · {inventory['total_cross_case_links']} cross-case link{'s' if inventory['total_cross_case_links'] != 1 else ''}"
-            evidence_bullets.append(bullet + ".")
-        if inventory.get("has_rag_evidence"):
-            evidence_bullets.append(f"{len(inventory.get('rag_citations', []))} narratively similar FIRs.")
-        if primary and primary.get("evidence_sources"):
-            engines_label = " + ".join(sorted(set(primary.get("evidence_sources", []))))
-            evidence_bullets.append(f"Source: {engines_label}.")
+        if context_required_findings:
+            detail = context_required_findings[0].get("description") or ""
+            if detail:
+                evidence_bullets.append(detail + ".")
+            evidence_bullets.append("No broad case query was executed.")
+        elif zero_result_findings and not primary:
+            for zf in zero_result_findings[:2]:
+                evidence_bullets.append(zf.get("description") or "")
+        else:
+            if inventory.get("has_case_evidence"):
+                cn = " ".join(inventory.get("crime_nos", [])[:2])
+                bullet = f"{inventory.get('total_cases', 0)} relevant case record{'s' if inventory.get('total_cases', 0) != 1 else ''}"
+                if cn:
+                    bullet += f" — FIR {cn}"
+                if inventory.get("districts"):
+                    bullet += f" · {', '.join(inventory['districts'][:2])}"
+                evidence_bullets.append(bullet + ".")
+            if inventory.get("has_pattern_evidence"):
+                mos = ", ".join(f"'{m}'" for m in inventory.get("mo_tags", [])[:3])
+                bullet = f"{inventory.get('total_patterns', 0)} pattern cluster{'s' if inventory.get('total_patterns', 0) != 1 else ''}"
+                if mos:
+                    bullet += f" sharing MO {mos}"
+                # Supporting FIRs + location + time range from the real patterns
+                for f in findings:
+                    if f["category"] == "Crime Patterns Detected":
+                        for p in f.get("data", {}).get("patterns", [])[:2]:
+                            pcases = p.get("cases", [])
+                            pn = p.get("case_count", 0) or len(pcases)
+                            fir_sample = ", ".join(str(c.get("crime_no")) for c in pcases[:3] if c.get("crime_no"))
+                            locs = ", ".join(sorted({str(c.get("district")) for c in pcases if c.get("district")})[:2])
+                            extra = f" — {pn} supporting case{'s' if pn != 1 else ''}"
+                            if fir_sample:
+                                extra += f" (FIR {fir_sample})"
+                            if locs:
+                                extra += f" · {locs}"
+                            if p.get("date_range"):
+                                extra += f" · {p['date_range']}"
+                            evidence_bullets.append((p.get("theme") or "Pattern") + extra + ".")
+                        break
+                evidence_bullets.append(bullet + ".")
+            if inventory.get("has_accused_evidence"):
+                aids = ", ".join(str(a) for a in inventory.get("accused_ids", [])[:5])
+                evidence_bullets.append(f"{len(inventory.get('accused_ids', []))} accused identified (IDs: {aids}).")
+            if inventory.get("has_financial_evidence"):
+                bullet = f"{inventory.get('total_financial_transactions', 0)} transactions"
+                if inventory.get("total_cross_case_links", 0):
+                    bullet += f" · {inventory['total_cross_case_links']} cross-case link{'s' if inventory['total_cross_case_links'] != 1 else ''}"
+                evidence_bullets.append(bullet + ".")
+            if inventory.get("has_rag_evidence"):
+                basis = ""
+                for f in findings:
+                    if f["category"] == "Narrative Intelligence" and f.get("data", {}).get("similarity_basis"):
+                        basis = f" (basis: {f['data']['similarity_basis']})"
+                        break
+                evidence_bullets.append(f"{len(inventory.get('rag_citations', []))} narratively similar FIRs{basis}.")
+            if primary and primary.get("evidence_sources"):
+                engines_label = " + ".join(sorted(set(primary.get("evidence_sources", []))))
+                evidence_bullets.append(f"Source: {engines_label}.")
 
         # ── WHY IT MATTERS ──
         why = ""
-        if scope_failed:
+        if context_required_findings:
+            why = ("An entity-centric request (financial trail, network, risk, similarity) "
+                   "requires a specific case, suspect, account, or prior investigation. "
+                   "Without one, no analysis can be grounded — the system does not guess.")
+        elif scope_failed:
             why = ("The analysis was stopped because an explicitly requested scope "
                    "could not be matched to the database. Re-run with a valid crime "
                    "category or district name — the scope will never be silently broadened.")
+        elif zero_result_findings and not primary:
+            why = "The engines ran within the requested scope and found no matching pattern/evidence; results are reported as-is without substitution."
         elif inventory.get("has_case_evidence") and inventory.get("has_pattern_evidence"):
             why = "The same modus operandi appears repeatedly within the requested investigation scope; these connected cases may warrant coordinated review."
         elif inventory.get("has_financial_evidence") and inventory.get("total_cross_case_links", 0) > 0:
@@ -1767,10 +2486,16 @@ class ResponseBuilder:
             inventory.get("has_accused_evidence"), inventory.get("has_financial_evidence"),
             inventory.get("has_rag_evidence"),
         ])
-        has_sufficient = has_any and not scope_failed
+        has_sufficient = has_any and not scope_failed and not context_required_findings
         uncertainty_note = None
-        if scope_failed:
+        if context_required_findings:
+            uncertainty_note = ("No investigation context is available. Provide a FIR/case number "
+                                "or refer to a specific investigation to continue.")
+        elif scope_failed:
             uncertainty_note = "Investigation scope could not be resolved. No engines were run on a broadened scope."
+        elif zero_result_findings and not has_any:
+            uncertainty_note = ("The engines completed but found no matching records for the requested "
+                                "scope; no pattern or evidence is claimed and no broader search was run.")
         elif not has_any:
             uncertainty_note = ("Insufficient evidence to establish that conclusion. "
                                 "The engines returned no matching records for the requested scope; "
@@ -1996,19 +2721,28 @@ class ResponseBuilder:
 
         # Build detailed evidence description including actual identifiers
         evidence_sections = []
+        zero_result_sections = []
         for f in findings:
-            if f["category"] in ("Investigation Overview", "Engine Failures"):
+            if f["category"] in ("Investigation Overview", "Engine Failures", "Context Required"):
+                continue
+            if f.get("zero_result"):
+                zero_result_sections.append(f"- {f['description']}")
                 continue
             evidence_sections.append(f"- {f['category']}: {f['description']} (strength: {f['strength']})")
 
         evidence_text = "\n".join(evidence_sections) if evidence_sections else "No evidence found."
+        zero_text = "\n".join(zero_result_sections) if zero_result_sections else ""
 
         # Build entity-level detail from inventory
         entity_details = []
         if inventory["has_case_evidence"]:
             cn_sample = ", ".join(inventory["crime_nos"][:5])
+            if inventory["total_cases"] > 0:
+                case_msg = f"CASE-LEVEL EVIDENCE EXISTS: {inventory['total_cases']} case records found."
+            else:
+                case_msg = "CASE-LEVEL EVIDENCE EXISTS: supporting FIRs identified through pattern/similarity results."
             entity_details.append(
-                f"CASE-LEVEL EVIDENCE EXISTS: {inventory['total_cases']} case records found."
+                case_msg
                 + (f" Sample CrimeNo values: {cn_sample}." if cn_sample else "")
                 + (f" Districts: {', '.join(inventory['districts'][:3])}." if inventory["districts"] else "")
             )
@@ -2053,6 +2787,9 @@ EVIDENCE FROM INTELLIGENCE ENGINES:
 ENTITY-LEVEL EVIDENCE INVENTORY:
 {entity_text}
 
+{f'''ZERO-RESULT FINDINGS (engines ran but found NOTHING in the requested scope):
+{zero_text}
+''' if zero_text else ""}
 Write a concise investigation summary (3-5 sentences maximum). STRICT RULES:
 1. State what was investigated.
 2. If CASE-LEVEL EVIDENCE EXISTS, acknowledge it and cite specific CrimeNo values from the inventory.
@@ -2065,6 +2802,7 @@ Write a concise investigation summary (3-5 sentences maximum). STRICT RULES:
 9. If NONE of case/pattern/accused/financial/RAG evidence exists, the ONLY conclusion allowed is: "Insufficient evidence to establish that conclusion." — briefly state what was searched and why no conclusion can be drawn. NEVER speculate, infer guilt, or invent records.
 10. Never claim a person is a mastermind, ringleader, or guilty — only describe what the records show.
 11. If the requested scope could not be resolved (scope warnings exist), say the investigation was stopped because the scope could not be resolved, and that no records were analyzed outside the requested scope.
+12. If ZERO-RESULT FINDINGS exist, state plainly that no pattern/trend was detected in the requested scope and repeat the cases-examined / time-period / location detail — NEVER claim a pattern exists, NEVER return a fake visualization, and NEVER substitute an unrelated case list.
 
 Investigation Summary:
 """
@@ -2099,10 +2837,13 @@ Investigation Summary:
         # Case-level evidence
         if inventory["has_case_evidence"]:
             cn_sample = ", ".join(inventory["crime_nos"][:3])
-            msg = f"Identified {inventory['total_cases']} relevant case records"
-            if cn_sample:
-                msg += f" (including CrimeNo {cn_sample})"
-            msg += "."
+            if inventory["total_cases"] > 0:
+                msg = f"Identified {inventory['total_cases']} relevant case records"
+                if cn_sample:
+                    msg += f" (including CrimeNo {cn_sample})"
+                msg += "."
+            else:
+                msg = "Supporting FIRs identified: " + (cn_sample or "none") + "."
             parts.append(msg)
 
         # Pattern-level evidence
@@ -2130,6 +2871,12 @@ Investigation Summary:
                 f"Financial analysis found {inventory['total_financial_transactions']} transactions"
                 f" and {inventory['total_cross_case_links']} cross-case links."
             )
+
+        # Zero-result engines: state plainly that nothing was found in scope
+        # (no pattern, no trend data) — never a substituted case list.
+        zero_findings = [f for f in findings if f.get("zero_result")]
+        for zf in zero_findings:
+            parts.append(zf.get("description") or "No matching evidence was found in the requested scope.")
 
         # Scope failures must be stated explicitly — never pretend a broadened
         # analysis succeeded.
@@ -2226,6 +2973,74 @@ class InvestigationEngine:
             request_text, conversation_history, investigation_context
         )
 
+        # ── Entity-first exact case override (code-enforced) ──
+        # When the request names a specific FIR/case identifier, the plan must
+        # resolve THAT record.  Words like "vehicle theft" in such questions are
+        # verification, not filters — so any filter the planner extracted from
+        # them is discarded here, before engines run.
+        #
+        # The FULL try_handle result is used (not just detect_and_lookup) so the
+        # deterministic, record-verified answer text (crime, status, station,
+        # registration date, verification yes/no) is carried into the response.
+        # The LLM synthesizer never re-derives these facts.
+        try:
+            exact_result = ExactCaseResolver().try_handle(request_text, rbac_filter=rbac_filter)
+        except Exception:
+            exact_result = {}
+        if exact_result.get("handled") and exact_result.get("case_identifier"):
+            record = (exact_result.get("cases") or [None])[0] if exact_result.get("total_count", 0) > 0 else None
+            exact_case = {
+                "found": bool(record),
+                "identifier": exact_result.get("case_identifier"),
+                "case_id_hint": exact_result.get("case_id_hint"),
+                "record": record,
+                "case_master_id": (record or {}).get("casemasterid") if record else None,
+                "crime_no": (record or {}).get("crimeno") if record else None,
+                "crime_sub_head": (record or {}).get("crime_sub_head") if record else None,
+                "crime_head": (record or {}).get("crime_head") if record else None,
+                "district": (record or {}).get("districtname") if record else None,
+                "station": (record or {}).get("police_station") if record else None,
+                "registered": str((record or {}).get("crimeregistereddate") or "")[:10] or None if record else None,
+                "status": (record or {}).get("casestatusname") if record else None,
+                "accused_ids": [a.get("accused_id") for a in (exact_result.get("accused") or []) if a.get("accused_id")],
+                # Deterministic, record-grounded answer — reused verbatim by the
+                # ResponseBuilder so LLM synthesis cannot dilute verified facts.
+                "answer": exact_result.get("answer"),
+                "intent": exact_result.get("intent"),
+            }
+            plan["exact_case"] = exact_case
+            # Never inherit/broaden scope for an exact-entity question
+            plan["filters"] = {}
+            plan["scope"] = {"crime_category": None, "district": None, "time_window": None}
+
+            # Pure factual questions about the identifier ("what is FIR X?",
+            # "is FIR X a vehicle theft case?") are exact_case_lookup. Analysis
+            # intents on top of the entity ("find cases similar to FIR X",
+            # "financial links of case X") keep their analysis intent — the
+            # exact record is the entity they analyze, not the answer itself.
+            analysis_intents = {
+                "case_similarity", "narrative_similarity", "financial_analysis",
+                "criminal_network", "risk_analysis", "behaviour_analysis",
+                "evidence_graph", "next_best_action", "forecasting",
+                "pattern_detection", "trend_analysis",
+            }
+            if plan.get("intent") not in analysis_intents:
+                plan["intent"] = "exact_case_lookup"
+                plan["engines"] = ["exact_case_lookup"]
+                plan.setdefault("routing", {})
+                plan["routing"]["intent_label"] = "Exact case/FIR lookup"
+            elif exact_case.get("found"):
+                plan["engines"] = list(dict.fromkeys(
+                    (plan.get("engines") or ["case_query"]) + ["case_query"]
+                ))
+            if exact_case.get("found"):
+                plan.setdefault("entities", {"case_ids": [], "accused_ids": []})
+                plan["entities"]["case_ids"] = [exact_case["case_master_id"]]
+            else:
+                # Invalid identifier: no engines run on a broadened scope
+                plan["engines"] = ["case_query"]
+                plan["entities"] = {"case_ids": [], "accused_ids": []}
+
         # Step 2: Execute engines according to plan
         evidence_items = self.orchestrator.execute_plan(
             plan=plan,
@@ -2245,4 +3060,104 @@ class InvestigationEngine:
         # Step 4: Build response
         response = self.builder.build_response(plan, fused_result)
 
+        # Step 5: Structured routing decision log (requirement: every routing
+        # decision visible for debugging: query → intent → entities → scope →
+        # engines → result counts → final response type).
+        response["routing_log"] = self._build_routing_log(
+            request_text, plan, evidence_items, fused_result, response
+        )
+        # Surface the actual intent (not a generic "investigation" label)
+        response["intent_detected"] = plan.get("intent", "investigation")
+        if plan.get("routing"):
+            response["routing"] = plan["routing"]
+
         return response
+
+    def _build_routing_log(self, query: str, plan: dict, evidence_items: list,
+                           fused_result: dict, response: dict) -> dict:
+        """
+        Structured server-side routing decision for debugging:
+
+            USER QUERY → DETECTED INTENT → RESOLVED ENTITIES → RESOLVED SCOPE
+            → SELECTED ENGINES → ENGINE INPUT SCOPE → RESULT COUNTS
+            → FINAL RESPONSE TYPE
+        """
+        resolved_scope = plan.get("resolved_scope") or {}
+        result_counts = {}
+        for item in evidence_items:
+            engine = item.get("engine", "")
+            itype = item.get("type", "")
+            data = item.get("data", {}) or {}
+            if itype == "case_list":
+                result_counts[engine] = len(data.get("cases", []))
+            elif itype == "patterns":
+                result_counts[engine] = sum(p.get("case_count", 0) or 0 for p in data.get("patterns", []))
+            elif itype == "similar_cases":
+                result_counts[engine] = len(data.get("similar_cases", []))
+            elif itype == "trend":
+                result_counts[engine] = len(data.get("trend_data", []))
+            elif itype == "financial_intelligence":
+                result_counts[engine] = (data.get("summary") or {}).get("total_transactions", 0)
+            elif itype == "network":
+                result_counts[engine] = (data.get("stats") or {}).get("node_count", 0)
+            elif itype == "risk_profiles":
+                result_counts[engine] = len(data.get("profiles", []))
+            elif itype == "narrative_matches":
+                result_counts[engine] = len(data.get("citations", []))
+            elif itype in ("context_required",):
+                result_counts["context_required"] = 1
+            elif itype == "zero_result":
+                result_counts[f"{engine}_zero_result"] = 1
+            elif itype == "error":
+                result_counts[f"{engine}_error"] = 1
+
+        # Which response type did the final answer take?
+        findings = fused_result.get("findings", [])
+        if any(f.get("context_required") for f in findings):
+            response_type = "context_required"
+        elif plan.get("intent") == "exact_case_lookup" and plan.get("exact_case") \
+                and plan["exact_case"].get("answer"):
+            response_type = "exact_case_deterministic"
+        elif any(f.get("zero_result") for f in findings) and not any(
+            f.get("strength") not in ("none",) for f in findings):
+            response_type = "zero_result"
+        else:
+            response_type = "evidence_fused"
+
+        return {
+            "query": query,
+            "detected_intent": plan.get("intent"),
+            "intent_label": (plan.get("routing") or {}).get("intent_label")
+                            or DeterministicIntentClassifier().describe(plan.get("intent")),
+            "deterministic": bool((plan.get("routing") or {}).get("deterministic")),
+            "routing_reasoning": (plan.get("routing") or {}).get("reasoning"),
+            "resolved_entities": {
+                "case_ids": sorted(int(x) for x in plan.get("entities", {}).get("case_ids", []) if x),
+                "accused_ids": sorted(int(x) for x in plan.get("entities", {}).get("accused_ids", []) if x),
+            },
+            "resolved_scope": {
+                "crime": (resolved_scope.get("crime") or {}).get("resolved_name")
+                         or (resolved_scope.get("crime") or {}).get("requested"),
+                "district": (resolved_scope.get("district") or {}).get("resolved_name")
+                             or (resolved_scope.get("district") or {}).get("requested"),
+                "time_window": (resolved_scope.get("time_window") or {}).get("label")
+                                or (resolved_scope.get("time_window") or {}).get("requested"),
+                "status": resolved_scope.get("status"),
+            },
+            "selected_engines": plan.get("engines", []),
+            "engine_input_scope": {
+                "crime": plan.get("filters", {}).get("crime_sub_head_name")
+                         or plan.get("filters", {}).get("crime_head_name")
+                         or plan.get("filters", {}).get("crime_category"),
+                "district": plan.get("filters", {}).get("district_name_resolved")
+                             or plan.get("filters", {}).get("district_name"),
+                "date_from": plan.get("filters", {}).get("date_from"),
+                "date_to": plan.get("filters", {}).get("date_to"),
+                "time_window": plan.get("filters", {}).get("time_window"),
+                "search_keyword": plan.get("filters", {}).get("search_keyword"),
+                "requires_context": plan.get("requires_context", False),
+            },
+            "result_counts": result_counts,
+            "final_response_type": response_type,
+            "answer_preview": (response.get("answer") or "")[:200],
+        }

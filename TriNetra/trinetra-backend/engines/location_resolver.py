@@ -202,6 +202,28 @@ class LocationResolver:
             )
             return self._finish_district(result, best3, "", norm_phrase)
 
+        # 3b) A phrase TOKEN matches a district name token ("registered in
+        #    bengaluru" has no "urban", but its "bengaluru" token identifies
+        #    Bengaluru Urban). Prefer the tightest district; urban wins ties.
+        phrase_tokens = {t for t in norm_phrase.split() if len(t) >= 4}
+        token_matches = []
+        for d in LocationResolver._districts:
+            dn_tokens = set(d["norm"].split())
+            for pt in phrase_tokens:
+                if any(pt in dt or dt in pt for dt in dn_tokens):
+                    token_matches.append(d)
+                    break
+        if token_matches:
+            best3b = min(
+                token_matches,
+                key=lambda d: (len(d["norm"]),
+                               0 if "urban" in d["norm"] else 1),
+            )
+            remainder = norm_phrase.replace(best3b["norm"], "", 1).strip()
+            if not remainder and norm_phrase not in best3b["norm"]:
+                remainder = ""
+            return self._finish_district(result, best3b, remainder, norm_phrase)
+
         # 4) Direct police-station match (e.g. "central ps 10")
         phrase_tokens = set(norm_phrase.split())
         unit_matches = [
@@ -303,6 +325,13 @@ class LocationResolver:
             })
         return result
 
+    # Tokens too generic to identify a crime by themselves ("attempt to
+    # murder" must never match a query that merely contains the word "to").
+    _WEAK_CRIME_TOKENS = {
+        "to", "of", "in", "for", "against", "and", "or", "the", "a", "an",
+        "with", "by", "on", "at", "case", "cases", "fir", "show", "list",
+    }
+
     def best_crime_match(self, query: str) -> dict:
         """
         Finds the best crime phrase INSIDE a full query and resolves it.
@@ -322,21 +351,27 @@ class LocationResolver:
         if not q_tokens:
             return result
 
-        # Score every sub-head by how many of its name tokens appear in the
-        # query, so "vehicle theft" (query tokens vehicle+theft) matches
-        # Motor Vehicle Theft (covers vehicle+theft) over generic Theft
-        # (covers only theft). Ties prefer the least specific name so a bare
-        # "theft" resolves to Theft, not Motor Vehicle Theft.
+        weak = LocationResolver._WEAK_CRIME_TOKENS
+
+        def _distinctive(sh):
+            return {t for t in sh["norm"].split() if t not in weak}
+
+        # Score every sub-head by how many DISTINCTIVE name tokens appear in
+        # the query, so "vehicle theft" (vehicle+theft) matches Motor Vehicle
+        # Theft over generic Theft, while a query containing only a weak token
+        # like "to" never matches "Attempt to Murder". Single-token names
+        # ("Burglary") match when their token is present. Ties prefer the
+        # least specific name so a bare "theft" resolves to Theft, not MVT.
         def _score(sh):
-            sh_tokens = set(sh["norm"].split())
-            coverage = len(sh_tokens & q_tokens)
-            return (-coverage, len(sh_tokens), len(sh["norm"]))
+            d = _distinctive(sh)
+            coverage = len(d & q_tokens)
+            return (-coverage, len(d), len(sh["norm"]))
 
         candidates = [sh for sh in LocationResolver._crime_subheads if sh["norm"]]
         candidates.sort(key=_score)
         best = candidates[0] if candidates else None
-        # No name token appears in the query → no crime match
-        if best is None or not (set(best["norm"].split()) & q_tokens):
+        # No distinctive name token appears in the query → no crime match
+        if best is None or not (_distinctive(best) & q_tokens):
             best = None
 
         if best is not None:
@@ -353,11 +388,11 @@ class LocationResolver:
             })
             return result
 
-        # Broad crime head fallback (fewest extra tokens)
+        # Broad crime head fallback (distinctive tokens only)
         heads = [h for h in LocationResolver._crime_heads if h["norm"]]
-        heads.sort(key=lambda h: (-len(set(h["norm"].split()) & q_tokens),
+        heads.sort(key=lambda h: (-len(_distinctive(h) & q_tokens),
                                   len(h["norm"].split()), len(h["norm"])))
-        if heads and (set(heads[0]["norm"].split()) & q_tokens):
+        if heads and (_distinctive(heads[0]) & q_tokens):
             h = heads[0]
             result.update({
                 "matched": True,
