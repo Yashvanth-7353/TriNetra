@@ -761,18 +761,92 @@ export async function fetchOffendersList(
   return response.json();
 }
 
-export interface PreventionAlert {
-  id: number;
+// ── Prevention Alerts (evidence-first, jurisdiction-scoped) ──
+
+export type PreventionScopeType = 'state' | 'district' | 'station';
+export type AlertSeverity = 'HIGH' | 'MEDIUM' | 'LOW';
+export type PreventionAlertType =
+  | 'rising_activity'
+  | 'geographic_cluster'
+  | 'repeated_modus_operandi'
+  | 'forecast_elevation';
+
+export interface PreventionJurisdiction {
+  role: string;
+  scope: PreventionScopeType;
+  district_id: number | null;
+  district_name: string | null;
+  unit_id: number | null;
+  unit_name?: string | null;
+  label: string;
+  scope_note: string;
+}
+
+export interface PreventionAnalysis {
+  as_of_date?: string;
+  data_recency_note?: string;
+  recent_window?: string;
+  comparison_window?: string;
+  mo_lookback_window?: string;
+  cases_reviewed: number;
+  recent_cases?: number;
+  comparison_cases?: number;
+  crime_categories_reviewed?: number;
+  stations_reviewed?: number;
+  insufficient_history?: boolean;
+  history_note?: string;
+  forecast_note?: string | null;
+}
+
+export interface PreventionSupportingCase {
+  case_id: number;
+  crime_no: string;
+  crime_registered_date: string | null;
+  police_station: string;
   district: string;
-  category: string;
-  reason: string;
-  severity: 'high' | 'medium';
-  data: { v: number }[];
+  brief_facts: string | null;
+}
+
+export interface PreventionAlertEvidence {
+  signal: string;
+  label: string;
+  description: string;
+  value: string;
+}
+
+export interface PreventionAlert {
+  alert_id: string;
+  alert_type: PreventionAlertType;
+  title: string;
+  severity: AlertSeverity;
+  crime_category: string | null;
+  crime_group: string | null;
+  location: string;
+  time_window: { recent: string; comparison?: string; forecast?: string };
+  summary: string;
+  evidence: PreventionAlertEvidence[];
+  supporting_case_count: number;
+  supporting_cases: PreventionSupportingCase[];
+  trend_change: { label: string; recent: number; comparison: number; pct: number | null };
+  source_engines: string[];
+  confidence: string;
+  mo_tags: string[];
+  stations_affected: string[];
+  score: {
+    total: number;
+    level: AlertSeverity;
+    confidence: string;
+    components: Record<string, { rule: string; points: number }>;
+  };
+  recommended_actions: string[];
 }
 
 export interface PreventionAlertsResponse {
   status: string;
+  jurisdiction: PreventionJurisdiction;
+  analysis: PreventionAnalysis;
   alerts: PreventionAlert[];
+  message?: string | null;
 }
 
 export async function fetchPreventionAlerts(districtId?: number): Promise<PreventionAlertsResponse> {
