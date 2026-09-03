@@ -168,7 +168,10 @@ export default function PatternAnalytics() {
                   {/* Top Map Section */}
                   <div className="h-2/5 border-b border-slate-200 relative bg-slate-200">
                     <MapContainer center={KARNATAKA_CENTER} zoom={6} className="w-full h-full absolute inset-0 z-0">
-                      <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
+                      <TileLayer
+                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                      />
                       {selectedPattern.cases.map(c => c.lat && c.lng && (
                         <CircleMarker 
                           key={c.case_id}
