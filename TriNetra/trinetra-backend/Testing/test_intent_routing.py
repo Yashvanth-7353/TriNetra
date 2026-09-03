@@ -78,6 +78,59 @@ CTX_FIR = {
 
 
 # ════════════════════════════════════════════════════════════════
+#  0. Exact-case analysis-anchor guard (no LLM, no DB)
+# ════════════════════════════════════════════════════════════════
+
+@needs_imports
+class TestExactCaseAnalysisAnchor:
+    """
+    A question that names a specific FIR but asks for an ANALYSIS of that FIR
+    (similar cases / financial trail / network links) must NOT be swallowed by
+    the exact-case resolver into a bare record description.
+    """
+
+    def _anchor(self, q):
+        from engines.exact_case import is_analysis_anchored
+        return is_analysis_anchored(q)
+
+    @pytest.mark.parametrize(
+        "q",
+        [
+            "Find cases similar to FIR 100050030202600014.",
+            "Show the financial trail for FIR 100050030202600014.",
+            "Show the transactions involving FIR 100050030202600014.",
+            "Who is connected to FIR 100050030202600014?",
+            "Find cases linked to FIR 100050030202600014.",
+        ],
+    )
+    def test_analysis_anchored_queries_declined(self, q):
+        assert self._anchor(q), q
+
+    @pytest.mark.parametrize(
+        "q",
+        [
+            "What is FIR 100050030202600014?",
+            "Is FIR 100050030202600014 a vehicle theft case?",
+            "What is the modus operandi in FIR 100050030202600014?",
+            "Show details of FIR 100050030202600014",
+            "What is the status of FIR 100050030202600014?",
+            "When was FIR 100050030202600014 registered?",
+        ],
+    )
+    def test_record_queries_keep_exact_path(self, q):
+        assert not self._anchor(q), q
+
+    def test_resolver_declines_analysis_anchor_without_db(self):
+        """handled=False (no DB round-trip) when an analysis anchor is present."""
+        from engines.exact_case import ExactCaseResolver
+        res = ExactCaseResolver(db_url=None)._try_handle(
+            "Find cases similar to FIR 100050030202600014.", rbac_filter="1=1"
+        )
+        assert res.get("handled") is False
+        assert res.get("analysis_anchor") is True
+
+
+# ════════════════════════════════════════════════════════════════
 #  1. Deterministic intent classifier (no LLM, no DB)
 # ════════════════════════════════════════════════════════════════
 
@@ -203,10 +256,102 @@ class TestIntentClassifier:
         assert r["intent"] == "criminal_network"
         assert r["requires_context"] is True
 
+    def test_possessive_followups_detected(self):
+        for q in [
+            "Show their transaction trail",
+            "Show his financial links",
+            "Trace their money",
+            "Show its financial trail",
+            "Map their network connections",
+        ]:
+            assert self._c().is_followup_reference(q), q
+            # with the previous investigation context, they are satisfiable
+            r = self._c().classify(q, CTX_FIR)
+            assert r["intent"] == "financial_analysis" or "network" in q.lower(), q
+            assert r["requires_context"] is False, q
+
+    def test_possessive_followup_still_respects_new_scope(self):
+        # "their" must not hijack a brand-new scope statement
+        c = self._c()
+        assert not c.is_followup_reference("Now show recent burglary cases in Mysuru")
+
     def test_risk_forecast_next_action(self):
         assert self._c().classify("What is the risk profile of Accused 80?")["intent"] == "risk_analysis"
         assert self._c().classify("Where might crime increase next month?")["intent"] == "forecasting"
         assert self._c().classify("What should investigators do next?")["intent"] == "next_best_action"
+
+    # ── forecasting vs trend (future window must win over trend) ──
+    def test_future_directional_phrasing_is_forecast_not_trend(self):
+        for q in [
+            "Predict which districts may see a spike in vehicle theft next year",
+            "Which areas might see rising burglary next quarter?",
+            "Where could burglary increase over the next 6 months?",
+            "Is crime likely to rise in Bengaluru next month?",
+        ]:
+            r = self._c().classify(q)
+            assert r["matched"], q
+            assert r["intent"] == "forecasting", (q, r["intent"])
+            assert "forecasting" in r["engines"], q
+
+    def test_crime_outlook_is_forecast(self):
+        for q in [
+            "What is the crime outlook for the next 6 months?",
+            "Forecast the vehicle theft outlook for next quarter",
+        ]:
+            r = self._c().classify(q)
+            assert r["matched"], q
+            assert r["intent"] == "forecasting", (q, r["intent"])
+
+    def test_backward_trend_not_forecast(self):
+        # No future reference → these stay trend / pattern, never forecasting.
+        for q in [
+            "How has motor vehicle theft changed over the last 6 months?",
+            "Are burglaries increasing in Mysuru?",
+            "Show the monthly trend of thefts",
+        ]:
+            r = self._c().classify(q)
+            assert "forecasting" not in r["intent"], q
+            assert "forecasting" not in (r.get("engines") or []), q
+
+    # ── behaviour analysis vs generic pattern ──────────────────
+    def test_offender_behaviour_pattern_is_behaviour_not_pattern(self):
+        for q in [
+            "Is there a pattern in the behaviour of repeat offenders?",
+            "Are repeat offenders following a behavioural pattern?",
+            "What patterns do we see in repeat offender behaviour?",
+        ]:
+            r = self._c().classify(q)
+            assert r["matched"], q
+            assert r["intent"] == "behaviour_analysis", (q, r["intent"])
+            # pattern_detection in engines is the sanctioned engine for
+            # behaviour_analysis — the PRIMARY intent is what must differ.
+            assert "risk_analysis" not in r["intent"], q
+
+    def test_crime_pattern_still_pattern_detection(self):
+        # Unrelated offender-behaviour phrasing must not have disabled patterns.
+        r = self._c().classify("Do we have a recurring pattern of motor vehicle theft?")
+        assert r["intent"] == "pattern_detection"
+
+    # ── bare "repeat offender" is not a risk request ──────────
+    def test_bare_repeat_offender_not_risk(self):
+        # A bare "repeat offenders" mention (entity description) must NOT be
+        # classified as a probability/risk request.
+        for q in [
+            "Who are the repeat offenders in this case?",
+            "List the repeat offenders among the accused",
+        ]:
+            r = self._c().classify(q)
+            assert r["intent"] != "risk_analysis", q
+
+    def test_likelihood_reoffending_is_risk(self):
+        for q in [
+            "Who is likely to reoffend?",
+            "Which suspects may reoffend in the future?",
+            "What is the likelihood of reoffending for these accused?",
+        ]:
+            r = self._c().classify(q)
+            assert r["matched"], q
+            assert r["intent"] == "risk_analysis", (q, r["intent"])
 
     def test_multi_engine_pattern_plus_network(self):
         r = self._c().classify(
@@ -462,6 +607,21 @@ class TestInvestigationPipeline:
         cats = {f["category"] for f in r["investigation"]["findings"]}
         assert "Criminal Network Analysis" in cats
 
+    def test_possessive_transaction_followup_keeps_entities(self):
+        # "Show their transaction trail" after a financial step must keep the
+        # previously discovered cases/accused (regression: an LLM context
+        # rewrite used to strip the possessive anchor and drop the entities).
+        ctx = {
+            "plan": {"filters": {}},
+            "resolved_scope": {},
+            "discovered_cases": [2804],
+            "discovered_accused": [1273, 1274, 2778],
+        }
+        r = self._run("Show their transaction trail", ctx=ctx)
+        assert r["intent_detected"] == "financial_analysis"
+        plan_entities = r["investigation"]["plan"].get("entities") or {}
+        assert 2804 in (plan_entities.get("case_ids") or [])
+
     def test_new_scope_replaces_old(self):
         r = self._run("Now find recent burglary cases in Mysuru.", ctx=CTX_FIR)
         plan = r["investigation"]["plan"]
@@ -476,6 +636,158 @@ class TestInvestigationPipeline:
         assert log.get("detected_intent") == "pattern_detection"
         assert "result_counts" in log
         assert "final_response_type" in log
+
+
+# ════════════════════════════════════════════════════════════════
+#  6. Analysis anchored on an exact FIR (DB-gated pipeline)
+# ════════════════════════════════════════════════════════════════
+
+@needs_imports
+@needs_db
+class TestAnalysisAnchoredOnExactFir:
+    """
+    "Find cases similar to FIR X" / "financial trail for FIR X" / "who is
+    connected to FIR X" must keep their ANALYSIS intent and anchor on the
+    resolved CaseMasterID — never degrade to an exact-case description of FIR X.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        from engines.nl2sql import NL2SQLEngine
+        from engines.rag import RAGEngine
+        from engines.graph import GraphEngine
+        from engines.network_engine import NetworkEngine
+        from engines.pattern_engine import PatternEngine
+        from engines.analytics import AnalyticsEngine
+        from engines.case_explorer import CaseExplorerEngine
+
+        cls.engine = InvestigationEngine()
+        cls.engine.planner.groq_client = None  # deterministic routing only
+        cls.engine.builder.groq_client = None  # deterministic summaries only
+        cls.nl2sql = NL2SQLEngine()
+        cls.rag = RAGEngine()
+        cls.graph = GraphEngine()
+        cls.network = NetworkEngine()
+        cls.pattern = PatternEngine()
+        cls.analytics = AnalyticsEngine()
+        cls.case_explorer = CaseExplorerEngine()
+
+    def _run(self, q):
+        return self.engine.run_investigation(
+            request_text=q,
+            rbac_filter="1=1",
+            conversation_history=[],
+            investigation_context=None,
+            nl2sql_engine=self.nl2sql,
+            rag_engine=self.rag,
+            graph_engine=self.graph,
+            network_engine=self.network,
+            pattern_engine=self.pattern,
+            analytics_engine=self.analytics,
+            case_explorer_engine=self.case_explorer,
+        )
+
+    def test_case_similarity_anchors_on_case_master_id(self):
+        r = self._run(f"Find cases similar to FIR {FIR}.")
+        assert r["intent_detected"] == "case_similarity"
+        ec = r["investigation"]["plan"].get("exact_case") or {}
+        assert ec.get("found") is True
+        assert ec.get("case_master_id") == 2598  # NOT the raw 18-digit FIR
+        cats = {f["category"] for f in r["investigation"]["findings"]}
+        assert "Related Cases (Similarity Analysis)" in cats
+
+    def test_financial_analysis_anchors_on_case_master_id(self):
+        r = self._run(f"Show the financial trail for FIR {FIR}.")
+        assert r["intent_detected"] == "financial_analysis"
+        plan = r["investigation"]["plan"]
+        ec = plan.get("exact_case") or {}
+        assert ec.get("case_master_id") == 2598
+        assert 2598 in plan["entities"].get("case_ids", [])
+
+    def test_criminal_network_anchors_on_case_master_id(self):
+        r = self._run(f"Who is connected to FIR {FIR}?")
+        assert r["intent_detected"] == "criminal_network"
+        ec = r["investigation"]["plan"].get("exact_case") or {}
+        assert ec.get("case_master_id") == 2598
+
+    def test_mo_of_fir_remains_exact_lookup(self):
+        r = self._run(f"What is the modus operandi in FIR {FIR}?")
+        assert r["intent_detected"] == "exact_case_lookup"
+        assert FIR in r.get("answer", "")
+
+    def test_invalid_fir_analysis_never_broadens(self):
+        r = self._run("Find cases similar to FIR 999999999999999999.")
+        findings = r["investigation"]["findings"]
+        cats = {f["category"] for f in findings}
+        # No unrelated case list and no invented similar cases
+        assert "Cases Identified" not in cats
+        assert "Similar Cases Found" not in cats
+
+    # ── derived engines (forecasting / next best action) ──────
+    def test_forecasting_intent_runs_statistical_engine(self):
+        r = self._run("What is the crime outlook for the next 6 months?")
+        assert r["intent_detected"] == "forecasting"
+        assert r.get("answer"), "derived forecast answer missing"
+        assert "outlook" in (r.get("answer") or "").lower() or "forecast" in (r.get("answer") or "").lower()
+
+    def test_forecast_with_future_window_not_trend(self):
+        r = self._run("Predict which districts may see a spike in vehicle theft next year")
+        assert r["intent_detected"] == "forecasting"
+        assert "trend_analysis" not in (r["investigation"]["plan"].get("engines") or [])
+
+    def test_next_best_action_runs_with_evidence(self):
+        r = self._run("What should investigators do next?")
+        assert r["intent_detected"] in ("next_best_action", "general_investigation")
+        if r["intent_detected"] == "next_best_action":
+            assert r.get("answer")
+
+    def test_evidence_graph_question_not_hijacked(self):
+        # Evidence/anchor wording must not collapse into an exact-case lookup
+        r = self._run(f"Show the evidence relationships for FIR {FIR}")
+        assert r["intent_detected"] != "exact_case_lookup"
+
+
+# ════════════════════════════════════════════════════════════════
+#  8. Unresolved explicit scope → structured failure, zero fallback
+# ════════════════════════════════════════════════════════════════
+
+@needs_db
+class TestUnresolvedScopeNeverBroadens:
+    def _lookup(self, q):
+        from engines.factual_lookup import FactualCaseLookup
+        return FactualCaseLookup().try_lookup(q)
+
+    def test_unknown_crime_of_form_stops(self):
+        r = self._lookup("Show me cases of quantum levitation in Bengaluru")
+        assert r["error_kind"] == "crime_unresolved"
+        assert r["cases"] == []
+        assert "quantum levitation" in r["answer"].lower()
+
+    def test_unknown_crime_registration_tail_stops(self):
+        r = self._lookup("cases of quantum levitation registered in Belagavi")
+        assert r["error_kind"] == "crime_unresolved"
+        assert r["cases"] == []
+
+    def test_known_crime_still_lists_records(self):
+        r = self._lookup("Show me burglary cases in Bengaluru")
+        assert r["error_kind"] is None
+        assert r["cases"]
+
+    def test_generic_case_request_not_false_positive(self):
+        for q in [
+            "Show me the latest cases in Bengaluru",
+            "What are the recent cases in Bagalkot?",
+            "cases registered yesterday",
+            "Show me cases from the last 6 months in Bengaluru",
+        ]:
+            r = self._lookup(q)
+            assert r["error_kind"] != "crime_unresolved", q
+            assert "quantum" not in str(r.get("answer", "")).lower(), q
+
+    def test_known_crime_of_form_not_blocked(self):
+        r = self._lookup("show cases of attempted murder in Ballari")
+        assert r["error_kind"] is None
+        assert r["cases"]
 
 
 if __name__ == "__main__":
