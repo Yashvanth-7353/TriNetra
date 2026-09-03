@@ -266,17 +266,46 @@ class NetworkEngine:
     #  SEARCH (by name or ID)
     # ══════════════════════════════════════════════
 
-    def search_accused(self, query: str, limit: int = 15) -> list:
-        """Searches accused by name or ID. Returns candidate list for the search box."""
+    def search_accused(self, query: str, limit: int = 15,
+                       unit_id: int = None, district_id: int = None) -> list:
+        """Searches accused by name or ID. Returns candidate list for the search box.
+
+        Args:
+            unit_id: Optional PoliceStationID (Unit) restriction — Investigator scope.
+            district_id: Optional DistrictID restriction — Supervisor scope.
+        Only accused linked to at least one case inside the given jurisdiction
+        are returned; Analyst/Policymaker pass neither and stay state-wide.
+        """
         conn = self._get_conn()
         cur = conn.cursor()
+
+        # Jurisdiction EXISTS condition (parameterized, server-generated only)
+        scope_cond = ""
+        scope_params = []
+        if unit_id:
+            scope_cond = (
+                " AND EXISTS (SELECT 1 FROM Accused sca JOIN CaseMaster scm"
+                " ON sca.CaseMasterID = scm.CaseMasterID"
+                " WHERE sca.AccusedMasterID = a.AccusedMasterID"
+                " AND scm.PoliceStationID = %s)"
+            )
+            scope_params.append(unit_id)
+        elif district_id:
+            scope_cond = (
+                " AND EXISTS (SELECT 1 FROM Accused sca JOIN CaseMaster scm"
+                " ON sca.CaseMasterID = scm.CaseMasterID JOIN Unit scu"
+                " ON scm.PoliceStationID = scu.UnitID"
+                " WHERE sca.AccusedMasterID = a.AccusedMasterID"
+                " AND scu.DistrictID = %s)"
+            )
+            scope_params.append(district_id)
 
         results = []
 
         # Try numeric ID first
         if query.strip().isdigit():
             accused_id = int(query.strip())
-            cur.execute("""
+            cur.execute(f"""
                 SELECT a.AccusedMasterID, a.AccusedName, a.AgeYear, a.GenderID,
                        d.DistrictName, cm.CrimeNo,
                        (SELECT COUNT(*) FROM Accused a2 WHERE a2.PersonID = a.PersonID AND a.PersonID IS NOT NULL) as case_count
@@ -284,11 +313,11 @@ class NetworkEngine:
                 JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
                 JOIN Unit u ON cm.PoliceStationID = u.UnitID
                 LEFT JOIN District d ON u.DistrictID = d.DistrictID
-                WHERE a.AccusedMasterID = %s
-            """, (accused_id,))
+                WHERE a.AccusedMasterID = %s{scope_cond}
+            """, tuple([accused_id] + scope_params))
         else:
             # Name search
-            cur.execute("""
+            cur.execute(f"""
                 SELECT a.AccusedMasterID, a.AccusedName, a.AgeYear, a.GenderID,
                        d.DistrictName, cm.CrimeNo,
                        (SELECT COUNT(*) FROM Accused a2 WHERE a2.PersonID = a.PersonID AND a.PersonID IS NOT NULL) as case_count
@@ -296,10 +325,10 @@ class NetworkEngine:
                 JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
                 JOIN Unit u ON cm.PoliceStationID = u.UnitID
                 LEFT JOIN District d ON u.DistrictID = d.DistrictID
-                WHERE a.AccusedName ILIKE %s
+                WHERE a.AccusedName ILIKE %s{scope_cond}
                 ORDER BY case_count DESC, a.AccusedMasterID
                 LIMIT %s
-            """, (f"%{query.strip()}%", limit))
+            """, tuple([f"%{query.strip()}%"] + scope_params + [limit]))
 
         for row in cur.fetchall():
             results.append({
@@ -315,6 +344,40 @@ class NetworkEngine:
         cur.close()
         conn.close()
         return results
+
+    def accused_in_scope(self, accused_id: int,
+                         unit_id: int = None, district_id: int = None) -> bool:
+        """Entry guard: is this accused linked to at least one case inside the
+        caller's jurisdiction (station for Investigator, district for
+        Supervisor)? Analyst/Policymaker pass neither and always resolve True.
+        """
+        conn = self._get_conn()
+        cur = conn.cursor()
+        try:
+            if not unit_id and not district_id:
+                cur.execute(
+                    "SELECT 1 FROM Accused WHERE AccusedMasterID = %s", (accused_id,)
+                )
+                return cur.fetchone() is not None
+            if unit_id:
+                cur.execute("""
+                    SELECT 1
+                    FROM Accused a
+                    JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
+                    WHERE a.AccusedMasterID = %s AND cm.PoliceStationID = %s
+                """, (accused_id, unit_id))
+            else:
+                cur.execute("""
+                    SELECT 1
+                    FROM Accused a
+                    JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
+                    JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                    WHERE a.AccusedMasterID = %s AND u.DistrictID = %s
+                """, (accused_id, district_id))
+            return cur.fetchone() is not None
+        finally:
+            cur.close()
+            conn.close()
 
     # ══════════════════════════════════════════════
     #  NETWORK TRAVERSAL

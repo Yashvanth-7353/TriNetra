@@ -158,6 +158,16 @@ _SIMILAR_NARRATIVE = re.compile(
     re.IGNORECASE,
 )
 
+# --- Explicit time-series vocabulary (used to decide whether a forecast
+# question is ALSO a genuine trend question — "monthly trend", "over the last
+# N months" — versus bare directional phrasing tied to a future window).
+_TREND_EXPLICIT = re.compile(
+    r"\b(trend|trends|monthly|yearly|quarterly|time[- ]series|over (the )?(last|past)|"
+    r"(last|past) \d+ months?|changed over|month over month|year over year|"
+    r"frequency (by|over|of)|rate of|month[- ]by[- ]month|\d+-?month (trend|change|pattern))\b",
+    re.IGNORECASE,
+)
+
 # --- Trend requests (time-series language; never a bare "pattern" mention)
 _TREND = re.compile(
     r"\b(trend|trends|monthly (trend|pattern|change)|yearly (trend|pattern|change)|"
@@ -173,20 +183,41 @@ _TREND = re.compile(
     re.IGNORECASE,
 )
 
-# --- Risk requests
+# --- Risk requests (probability/assessment phrasing only — a bare "repeat
+# offender" mention is an entity description, not a risk request).
 _RISK = re.compile(
-    r"\b(risk (profile|score|assessment|level)|high[- ]risk (suspect|offender|accused)|"
-    r"re[- ]?offend|reoffend(er|ing)?|repeat offender|dangerous (offender|suspect)|"
-    r"how dangerous|likelihood of (re[- ]?offending|reoffending)|risk of (re[- ]?offending|reoffending))\b",
+    r"\b(risk (profile|score|assessment|level|indicator)|high[- ]risk (suspect|offender|accused)|"
+    r"dangerous (offender|suspect)|how dangerous|"
+    r"likelihood of (re[- ]?offending|reoffending)|risk of (re[- ]?offending|reoffending)|"
+    r"(who|which|they|suspects?|offenders?|accused|likely|may|might|will)\b[^\n]{0,30}\b(re[- ]?offend(er|ing)?|reoffend(er|ing)?))\b",
     re.IGNORECASE,
 )
 
-# --- Forecasting requests
+# --- Behaviour analysis (repeat-offender / offender-behaviour patterns)
+_BEHAVIOUR = re.compile(
+    r"\b(repeat(ed|ing)? (offender|offenders|offending|behaviour|behavior)|"
+    r"behaviour(al)? pattern|behavior(al)? pattern|"
+    r"pattern (of|in) (the )?(repeated )?(offender )?(behaviour|behavior|offending)|"
+    r"(offender|offenders|offending) (behaviour|behavior))\b",
+    re.IGNORECASE,
+)
+
+# --- Forecasting requests (future-oriented only). Every clause requires an
+# explicit future reference so plain "where is crime" / "increase in theft"
+# stay with case-search / trend.
 _FORECAST = re.compile(
-    r"\b(forecast|forecasting|predict(ed|ing)? (crime|crimes|cases|hotspots)|"
-    r"future hotspots?|where (might|will|is|are) (crime|crimes|cases|thefts|burglaries)|"
-    r"what (will|might) (happen|happening).{0,20}(next month|next year|future)|"
-    r"projected|projection of (crime|cases))\b",
+    r"\b(forecast(ing|ed)?|predict(ed|ing)?|project(ed|ion|ing)?|estimate(d)?)\b[^\n]{0,70}"
+    r"\b(next (month|quarter|year|months|few|6 months)|future|coming|outlook)\b"
+    r"|\b(outlook|prediction|projection|forecast)s?\b[^\n]{0,45}\b(for |of |on )?(the )?(next|coming|future)\b"
+    r"|\b(crime|crimes|cases|theft|thefts|burglary|burglaries|offences|offenses)\b[^\n]{0,30}"
+    r"\b(outlook|forecast|prediction|projection)\b"
+    r"|\b(will|may|might|could|likely|expected|set|going|predicted|projected)\b[^\n]{0,40}"
+    r"\b(increase|spike|rise|surge|decrease|decline|drop|fall|grow|reduc|escalate|change|shift)\w*\b"
+    r"[^\n]{0,45}\b(next (month|quarter|year|months|few|6 months)|future|coming months|"
+    r"in the coming|over the next|upcoming)\b"
+    r"|\b(areas?|districts?|regions?|locations?|places?|hotspots?|stations?)\b[^\n]{0,35}"
+    r"\b(will|may|might|could|likely|expected|set|going|predicted|projected)\b[^\n]{0,35}"
+    r"\b(see|experience|face|witness|have)\b[^\n]{0,40}\b(next|future|coming|upcoming)\b",
     re.IGNORECASE,
 )
 
@@ -233,7 +264,10 @@ _FOLLOWUP_REF = re.compile(
     r"those offenders?|these people|those people|these individuals?|those individuals?|"
     r"any of (them|these|those)|which ones?|the suspects?|the accused|the offenders?|"
     r"connected to (it|him|her|them|this|that)|linked to (it|him|her|them|this|that)|"
-    r"are they|do they|is it|does it|show (the )?(financial )?(trail|transactions?|accounts?|money))\b",
+    r"are they|do they|is it|does it|show (the )?(financial )?(trail|transactions?|accounts?|money)|"
+    r"(show|trace|find|list|display|get|map)\b[^\n]{0,18}\b(their|his|her|its)\b[^\n]{0,25}"
+    r"\b(transactions?|financial|accounts?|money|trail|network|connections?|links?|"
+    r"suspects?|accused|offenders?|involvement)\b)\b",
     re.IGNORECASE,
 )
 
@@ -317,8 +351,10 @@ class DeterministicIntentClassifier:
 
         # ── 2. Pattern (recurring / common MO / cluster) — BEFORE network and
         #    trend so "recurring pattern ... and connected suspects" labels as
-        #    pattern and "recurring pattern over time" never routes to trend. ──
-        if _PATTERN.search(ql):
+        #    pattern and "recurring pattern over time" never routes to trend.
+        #    Offender-behaviour phrasing belongs to behaviour_analysis, not
+        #    pattern_detection. ──
+        if _PATTERN.search(ql) and not _BEHAVIOUR.search(ql):
             intents.append("pattern_detection")
             reasons.append("pattern phrasing detected")
 
@@ -327,12 +363,19 @@ class DeterministicIntentClassifier:
             intents.append("criminal_network")
             reasons.append("connection/network phrasing detected")
 
-        # ── 4. Trend (explicit time-series language) ──
+        # ── 4. Forecasting (future-oriented) — evaluated before trend so a
+        #    directional phrase tied to a future window ("spike ... next year")
+        #    is a forecast, not a backwards-looking trend. ──
+        if _FORECAST.search(ql):
+            intents.append("forecasting")
+            reasons.append("forecasting phrasing detected")
+
+        # ── 5. Trend (explicit time-series language) ──
         if _TREND.search(ql):
             intents.append("trend_analysis")
             reasons.append("trend/time-series phrasing detected")
 
-        # ── 5. Similarity — case-level vs narrative/MO-level ──
+        # ── 6. Similarity — case-level vs narrative/MO-level ──
         sim_case = _SIMILAR_CASE.search(ql)
         sim_narrative = _SIMILAR_NARRATIVE.search(ql)
         if sim_case or sim_narrative:
@@ -351,15 +394,10 @@ class DeterministicIntentClassifier:
                 intents.append("narrative_similarity")
                 reasons.append("MO/narrative similarity phrasing detected")
 
-        # ── 6. Risk ──
+        # ── 7. Risk ──
         if _RISK.search(ql):
             intents.append("risk_analysis")
             reasons.append("risk phrasing detected")
-
-        # ── 7. Forecasting ──
-        if _FORECAST.search(ql):
-            intents.append("forecasting")
-            reasons.append("forecasting phrasing detected")
 
         # ── 8. Next best action ──
         if _NEXT_ACTION.search(ql):
@@ -372,8 +410,7 @@ class DeterministicIntentClassifier:
             reasons.append("evidence-relationship phrasing detected")
 
         # ── 10. Behaviour analysis (repeated offender behaviour) ──
-        if re.search(r"\b(repeat(ed|ing)? (offender|offending|behaviour|behavior)|"
-                     r"behaviour(al)? pattern|behavior(al)? pattern)\b", ql):
+        if _BEHAVIOUR.search(ql):
             intents.append("behaviour_analysis")
             reasons.append("behaviour-pattern phrasing detected")
 
@@ -413,6 +450,15 @@ class DeterministicIntentClassifier:
                 "mo_phrase": None,
                 "reasoning": "no deterministic rule matched",
             }
+
+        # A future-window question that only triggered trend through bare
+        # directional phrasing ("spike in ... next year") is a forecast, not a
+        # trend+forecast double: drop the trend intent unless the query also
+        # carries real time-series vocabulary (monthly trend, over the last N
+        # months, changed over time, ...).
+        if ("forecasting" in intents and "trend_analysis" in intents
+                and not _TREND_EXPLICIT.search(ql)):
+            intents = [i for i in intents if i != "trend_analysis"]
 
         # Primary intent = highest-priority match; engines = union of all
         # matched intents (multi-engine questions are allowed).

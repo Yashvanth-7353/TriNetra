@@ -53,6 +53,32 @@ _ENTITY_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+# ── Analysis-anchor guard ────────────────────────────────────
+# A query that NAMES an exact case/FIR but then asks for an ANALYSIS OF that
+# case (financial trail, network links, similar cases, pattern membership) is
+# NOT an exact-case lookup. The FIR is the anchor entity for another engine;
+# answering it with the FIR's own details would silently swallow the request.
+# When these markers are present (after stripping the identifier) the resolver
+# declines (handled=False) so the planner/delegation can run the right engine
+# on the FIR entity. Attribute/verification questions ("what crime is FIR X",
+# "is FIR X a vehicle theft case", "details of FIR X") keep the exact path.
+_ANALYSIS_ANCHOR = re.compile(
+    r"\b(similar(ity)?|comparable|compare|same\s+(mo|modus\s*operandi|method|pattern)|financial|money|"
+    r"bank|account|transaction|transactions|trail|funded|paid|transfer|connected|connection|network|"
+    r"linked?\s*to|associated\s+with|recurring\s+pattern|pattern\s+membership|"
+    r"part\s+of\s+a\s+pattern|cluster|evidence\s+(graph|map|mapping|relationships?|links?|trail)|"
+    r"relationship(s)?\s*(graph|map|diagram)|map\s+(the\s+)?(evidence|relationships?|links?)|risk|behaviour|forecast|trend)\b",
+    re.IGNORECASE,
+)
+
+
+def is_analysis_anchored(query: str) -> bool:
+    """True when the query asks for an analysis anchored on a case identifier
+    (financial / network / similarity / pattern) rather than details about the
+    case record itself. Exported for regression tests."""
+    return bool(_ANALYSIS_ANCHOR.search(query or ""))
+
+
 # Sub-intent classification (non-exhaustive — the planner still runs for the
 # rest; these simply bias toward exact-entity semantics).
 _CRIME_QUESTION = re.compile(
@@ -356,6 +382,24 @@ class ExactCaseResolver:
             return {"handled": False}
 
         identifier = identifier_info["value"]
+        # Analysis-anchor guard: "similar to / financial trail for / who is
+        # connected to FIR X" names FIR X as an ENTITY for another engine, not
+        # as the record being described. Let the planner run that engine with
+        # FIR X as the anchor instead of answering with the FIR's own details.
+        q_clean_for_guard = self._query_clean_of_id(query, identifier)
+        if is_analysis_anchored(q_clean_for_guard):
+            logger.info(
+                "TRINETRA_ROUTE query=%r detected_case_id=%s route=delegated_analysis "
+                "reason=analysis_anchor_guard",
+                query, identifier,
+            )
+            return {
+                "handled": False,
+                "analysis_anchor": True,
+                "case_identifier": identifier,
+                "case_id_hint": identifier_info["hint"],
+            }
+
         lookup = self.lookup_identifier(identifier, identifier_info["hint"], rbac_filter)
         record = lookup.get("record")
         found = lookup.get("found")

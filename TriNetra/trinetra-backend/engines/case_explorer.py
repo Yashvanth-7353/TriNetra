@@ -188,14 +188,28 @@ class CaseExplorerEngine:
     # ──────────────────────────────────────────────
     #  3. Full Case Detail
     # ──────────────────────────────────────────────
-    def get_case_detail(self, case_master_id: int) -> dict:
-        """Returns complete case information for the detail drawer."""
+    def get_case_detail(self, case_master_id: int, rbac_filter: str = None) -> dict:
+        """Returns complete case information for the detail drawer.
+
+        Args:
+            rbac_filter: Optional server-generated row-level security condition
+                (e.g. "cm.PoliceStationID = 19" / "u.DistrictID = 5" / "1=1").
+                When not None/1=1 it is ANDed into the core query so a caller
+                outside the case's jurisdiction sees "not found" instead of data.
+        """
         try:
             conn = self._get_conn()
             cur = conn.cursor()
 
             # ── Core case info ──
-            cur.execute("""
+            # The RBAC condition references cm.PoliceStationID / u.DistrictID,
+            # both available via the mandatory Unit join below.
+            rbac_condition = ""
+            if rbac_filter and rbac_filter.strip() not in ("", "1=1"):
+                # Basic hygiene: only server-generated filters reach this point.
+                if ";" not in rbac_filter and "--" not in rbac_filter:
+                    rbac_condition = f" AND ({rbac_filter})"
+            cur.execute(f"""
                 SELECT
                     cm.CaseMasterID,
                     cm.CrimeNo,
@@ -225,7 +239,7 @@ class CaseExplorerEngine:
                 LEFT JOIN CrimeSubHead csh ON cm.CrimeMinorHeadID = csh.CrimeSubHeadID
                 LEFT JOIN GravityOffence go ON cm.GravityOffenceID = go.GravityOffenceID
                 LEFT JOIN Court ct ON cm.CourtID = ct.CourtID
-                WHERE cm.CaseMasterID = %s
+                WHERE cm.CaseMasterID = %s{rbac_condition}
             """, (case_master_id,))
 
             row = cur.fetchone()
@@ -364,10 +378,8 @@ class CaseExplorerEngine:
                     "district": r[4],
                     "station": r[5],
                 })
-
             cur.close()
             conn.close()
-
             return {
                 "case": case_info,
                 "status_history": status_history,
@@ -379,3 +391,34 @@ class CaseExplorerEngine:
             }
         except Exception as e:
             return {"error": str(e)}
+
+    # ──────────────────────────────────────────────
+    #  4. Jurisdiction Scope Probe
+    # ──────────────────────────────────────────────
+    def is_case_in_scope(self, case_master_id: int, rbac_filter: str = None) -> bool:
+        """Checks whether a specific case is visible under a server-generated
+        RBAC condition without returning any case content (used for entry
+        guards, e.g. similarity endpoints).
+        """
+        try:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            rbac_condition = ""
+            if rbac_filter and rbac_filter.strip() not in ("", "1=1"):
+                if ";" not in rbac_filter and "--" not in rbac_filter:
+                    rbac_condition = f" AND ({rbac_filter})"
+            cur.execute(
+                f"""
+                SELECT 1
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE cm.CaseMasterID = %s{rbac_condition}
+                """,
+                (case_master_id,),
+            )
+            found = cur.fetchone() is not None
+            cur.close()
+            conn.close()
+            return found
+        except Exception:
+            return False

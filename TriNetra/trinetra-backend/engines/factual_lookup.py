@@ -158,6 +158,11 @@ class FactualCaseLookup:
         crime = self.resolver.best_crime_match(q)
         if crime.get("matched"):
             spec["crime_phrase"] = crime["phrase"]
+        else:
+            # Remember an explicit-but-unresolvable crime mention so the
+            # executor can fail the scope instead of silently dropping the
+            # filter and returning unrelated records.
+            spec["crime_unresolved_phrase"] = self._unresolved_crime_phrase(q)
 
         # Status phrase — matched against the real CaseStatusMaster names
         status = self.resolver.best_status_match(q)
@@ -211,6 +216,88 @@ class FactualCaseLookup:
             spec["is_case_lookup"] = True
 
         return spec
+
+    _CRIME_SLOT_STOPWORDS = {
+        # retrieval verbs / pronouns / fillers
+        "show", "shows", "list", "lists", "find", "give", "get", "tell", "display",
+        "fetch", "pull", "search", "look", "know", "me", "we", "us", "i", "they",
+        "are", "is", "was", "were", "what", "how", "many", "any", "all", "the",
+        "a", "an", "of", "for", "about", "regarding", "with", "in", "at", "on",
+        "from", "since", "during", "over", "past", "last", "few", "into", "near",
+        "within", "across", "around", "does", "do", "it", "this", "that", "these",
+        "those", "such", "some", "total", "number", "new", "open", "active",
+        "closed", "other", "related", "similar", "current", "following", "registered",
+        "reported", "filed", "involving", "having", "against", "between", "among",
+        "after", "before", "up", "to", "by", "also", "there", "here", "please",
+        "can", "could", "would", "will", "do", "did", "recent", "recently", "latest",
+        "total", "count", "me", "them", "our", "your", "their", "cases", "case",
+        "crimes", "crime", "offences", "offense", "incidents", "incident",
+        "complaints", "complaint", "records", "record", "firs", "fir", "details",
+        "detail", "information", "info", "status", "list", "lists", "out", "now",
+        "still", "ever", "else", "anything", "something", "whats", "happening",
+        "happened", "going", "come", "came", "take", "took", "involved", "involve",
+        "registered", "lodged", "filed", "reported", "seen", "saw", "anyone",
+    }
+
+    def _unresolved_crime_phrase(self, q: str) -> str:
+        """Detects an explicit crime-label mention that failed to resolve to a
+        known CrimeSubHead/CrimeHead, e.g. "cases of quantum levitation".
+        Returns the raw phrase, or None when nothing crime-like was named."""
+        ql = q.strip().rstrip(".!?").strip()
+        if not ql:
+            return None
+        # "cases of X [in <place>]" / "crimes of X" (optionally with a
+        # location / registration tail). The phrase must run to the end of the
+        # sentence so "cases of the accused"-style references never trigger.
+        # Lazy capture: the object phrase must NOT swallow a following
+        # location/registration tail ("cases of X in Bengaluru" -> X only).
+        m = re.search(
+            r"\b(cases?|crimes?|offences?|offenses?|incidents?|complaints?)\s+"
+            r"(?:of|about|for|regarding|on)\s+([a-z][a-z0-9 .'\-]{2,60}?)"
+            r"(?:\s+(?:in|at|within|near|of|for|across|around|registered\s+in|"
+            r"reported\s+in|filed\s+in|registered\s+at|reported\s+at)\s+"
+            r"[a-z][a-z0-9 .'\-]{2,60})?\s*$",
+            ql, re.IGNORECASE,
+        )
+        if m:
+            cand = m.group(2).strip().strip(",;").strip()
+            if self._valid_crime_candidate(cand):
+                return cand
+        # "X cases" / "X crimes" where X is a noun phrase immediately before
+        # the record keyword ("quantum levitation cases"). The whole chunk is
+        # validated so retrieval verbs / fillers disqualify it.
+        m = re.search(r"\b([a-z][a-z0-9 .'\-]{2,60})\s+(?:cases?|crimes?|offences?|offenses?)\b", ql)
+        if m:
+            cand = m.group(1).strip().strip(",;").strip()
+            if self._valid_crime_candidate(cand):
+                return cand
+        return None
+
+    def _valid_crime_candidate(self, cand: str) -> bool:
+        c = cand.lower().strip().rstrip(",;").strip()
+        if not c:
+            return False
+        content = [t.strip(",;:.") for t in c.split()
+                   if t.strip(",;:.") not in self._CRIME_SLOT_STOPWORDS]
+        content = [t for t in content if t]
+        if not content:
+            return False
+        # require at least one real content word (len >= 4) so filler-only
+        # chunks ("me the latest") never become a "crime".
+        if not any(len(t) >= 4 for t in content):
+            return False
+        if re.search(r"\b(accused|suspects?|offenders?|witness|victims?|police|station|"
+                     r"district|city|village|taluk|monday|tuesday|wednesday|thursday|friday|"
+                     r"saturday|sunday|today|yesterday|tomorrow|morning|evening|night|noon)", c):
+            return False
+        # If the phrase is actually a resolvable location it is not a crime.
+        try:
+            loc = self.resolver.resolve(c)
+            if loc.get("matched"):
+                return False
+        except Exception:
+            pass
+        return True
 
     def _extract_location_phrase(self, q: str) -> str:
         """
@@ -306,6 +393,31 @@ class FactualCaseLookup:
         # ── Resolve crime / status ──
         crime = self.resolver.resolve_crime(spec["crime_phrase"]) if spec["crime_phrase"] else {"matched": False}
         status = self.resolver.resolve_status(spec["status_phrase"]) if spec["status_phrase"] else {"matched": False}
+
+        # Crime explicitly mentioned but unresolvable → stop, never broaden
+        unresolved_crime = spec.get("crime_unresolved_phrase")
+        if unresolved_crime and not (crime.get("matched")):
+            scope.update({
+                "status": "failed",
+                "crime": unresolved_crime,
+                "location_requested": spec["location_phrase"],
+            })
+            return {
+                "handled": True,
+                "answer": (
+                    f"I couldn't map \u201c{unresolved_crime}\u201d to a known crime "
+                    "category in the authorized records. Please rephrase with an "
+                    "official category (for example \u201cburglary\u201d or \u201cmotor "
+                    "vehicle theft\u201d) or check the exact wording used in the FIR."
+                ),
+                "citations": [],
+                "cases": [],
+                "total_count": 0,
+                "resolved_query": f"CRIME_UNRESOLVED: {unresolved_crime}",
+                "execution_detail": "Stopped: crime scope could not be resolved.",
+                "scope": scope,
+                "error_kind": "crime_unresolved",
+            }
 
         # ── Build query params ──
         params = {

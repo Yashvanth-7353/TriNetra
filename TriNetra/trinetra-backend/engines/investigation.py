@@ -2723,12 +2723,15 @@ class ResponseBuilder:
         evidence_sections = []
         zero_result_sections = []
         for f in findings:
-            if f["category"] in ("Investigation Overview", "Engine Failures", "Context Required"):
+            if f.get("category") in ("Investigation Overview", "Engine Failures", "Context Required"):
                 continue
             if f.get("zero_result"):
-                zero_result_sections.append(f"- {f['description']}")
+                zero_result_sections.append(f"- {f.get('description', 'No matching evidence found')}")
                 continue
-            evidence_sections.append(f"- {f['category']}: {f['description']} (strength: {f['strength']})")
+            evidence_sections.append(
+                f"- {f.get('category', 'Finding')}: {f.get('description', 'No detail')} "
+                f"(strength: {f.get('strength', 'low')})"
+            )
 
         evidence_text = "\n".join(evidence_sections) if evidence_sections else "No evidence found."
         zero_text = "\n".join(zero_result_sections) if zero_result_sections else ""
@@ -2946,6 +2949,215 @@ class InvestigationEngine:
         self.fusion = EvidenceFusion()
         self.builder = ResponseBuilder()
 
+    # ──────────────────────────────────────────────────────────
+    #  DERIVED ENGINES (execute after evidence fusion)
+    #
+    # A few canonical intents are served by engines that CONSUME either raw
+    # statistics or the fused findings rather than running a data query of
+    # their own:
+    #   - forecasting   → CrimeForecastingEngine over the resolved scope
+    #   - next_best_action → NextBestActionEngine over the fused findings
+    #   - evidence_graph   → EvidenceGraphBuilder over the fused findings
+    # When they cannot run (no scope / no evidence), the response must say so
+    # explicitly — never a misleading "0 findings → insufficient evidence".
+    # ──────────────────────────────────────────────────────────
+
+    def _derive_engine_outputs(self, request_text: str, plan: dict,
+                               findings: list, rbac_filter: str) -> dict:
+        """Returns {"findings": [...], "answer": str|None}."""
+        intent = plan.get("intent", "")
+        engines = plan.get("engines", []) or []
+        derived = {"findings": [], "answer": None}
+
+        if intent == "forecasting" or "forecasting" in engines:
+            self._derive_forecasting(plan, findings, rbac_filter, derived)
+        elif intent == "next_best_action" or "next_best_action" in engines:
+            self._derive_next_best_action(plan, findings, derived)
+        elif intent == "evidence_graph" or "evidence_graph" in engines:
+            self._derive_evidence_graph(plan, findings, derived)
+        return derived
+
+    def _district_id_for_name(self, district_name: str):
+        """Resolves a district name to DistrictID (parameterized; None on miss)."""
+        db_url = getattr(self, "db_url", None) or os.getenv("NEON_DATABASE_URL")
+        if not district_name or not db_url:
+            return None
+        try:
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT DistrictID FROM District WHERE LOWER(DistrictName) = LOWER(%s) LIMIT 1",
+                (district_name,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    def _derive_forecasting(self, plan: dict, findings: list, rbac_filter: str,
+                            derived: dict) -> None:
+        """Runs the statistical forecast engine over the resolved scope.
+
+        The model works at case-category grain (FIR/UDR/Zero FIR) and always
+        applies the RBAC condition to the underlying monthly counts. When the
+        question names a specific crime sub-head the category-level outlook is
+        returned WITH an explicit granularity note — never fabricated data.
+        """
+        filters = plan.get("filters") or {}
+        scope = plan.get("resolved_scope") or {}
+        crime = scope.get("crime") or {}
+        requested_crime = (filters.get("crime_category") or "")
+        if not requested_crime and crime.get("requested"):
+            requested_crime = crime["requested"]
+        if not requested_crime and crime.get("resolved_name"):
+            requested_crime = crime["resolved_name"]
+
+        # State-wide roles may request any district; jurisdiction-bound roles
+        # are forced onto their RBAC scope (district_id=None → the forecast
+        # engine applies the rbac_filter to every monthly query).
+        district_id = filters.get("district_id")
+        if rbac_filter and rbac_filter.strip() not in ("", "1=1"):
+            district_id = None
+        elif not district_id:
+            district = scope.get("district") or {}
+            name = district.get("resolved_name") or district.get("requested")
+            district_id = self._district_id_for_name(name) if name else None
+
+        try:
+            from engines.forecasting import CrimeForecastingEngine
+            res = CrimeForecastingEngine().forecast_all_categories(
+                district_id=district_id, horizon=3, rbac_filter=rbac_filter or "1=1"
+            )
+        except Exception as e:
+            derived["answer"] = (
+                "Forecasting could not be completed for the requested scope "
+                f"(engine error: {str(e)[:120]})."
+            )
+            return
+
+        cats = (res or {}).get("categories") or []
+        if not cats:
+            derived["answer"] = (
+                "Insufficient historical data to produce a statistical forecast "
+                "for the requested scope."
+            )
+            return
+
+        district_name = None
+        if district_id:
+            district_name = (scope.get("district") or {}).get("resolved_name")
+        label = f" for {district_name}" if district_name else (
+            " for your authorized jurisdiction" if rbac_filter and rbac_filter.strip() not in ("", "1=1") else ""
+        )
+        lines = []
+        for c in cats:
+            direction = c.get("direction") or "stable"
+            cur_avg = c.get("current_monthly_avg")
+            f_avg = c.get("forecast_avg")
+            mape = c.get("model_mape")
+            if cur_avg is None or f_avg is None:
+                continue
+            if direction == "increasing":
+                delta = (f_avg - cur_avg) / max(cur_avg, 1) * 100
+                lines.append(f"{c.get('category')}: forecast {delta:+.0f}% vs current monthly average ({cur_avg:g} → {f_avg:g} cases/mo; model error {mape or 'n/a'}%)")
+            elif direction == "decreasing":
+                delta = (f_avg - cur_avg) / max(cur_avg, 1) * 100
+                lines.append(f"{c.get('category')}: forecast {delta:+.0f}% vs current monthly average ({cur_avg:g} → {f_avg:g} cases/mo; model error {mape or 'n/a'}%)")
+            else:
+                lines.append(f"{c.get('category')}: stable outlook ({f_avg:g} cases/mo; model error {mape or 'n/a'}%)")
+        if not lines:
+            lines = [f"{c.get('category')}: {c.get('direction')}" for c in cats]
+        answer = (
+            f"Statistical outlook (3-month){label}:\n" + "\n".join(f"\u2022 {l}" for l in lines)
+        )
+        if requested_crime:
+            answer += (
+                "\n\nNote: the forecast model operates at case-category level "
+                f"(FIR/UDR/Zero FIR); a {requested_crime}-specific sub-head "
+                "projection is not modelled — the outlook above covers the "
+                "requested jurisdiction."
+            )
+        derived["answer"] = answer
+        derived["findings"].append({
+            "engine": "forecasting",
+            "type": "forecasting",
+            "category": "Forecasting Outlook",
+            "description": "Statistical 3-month outlook by case category: "
+                            + "; ".join(l for l in lines[:3]) + ".",
+            "data": {
+                "categories": cats,
+                "horizon_months": (res or {}).get("horizon_months", 3),
+                "district": district_name,
+                "limitations": [
+                    "Model grain is case-category level; sub-head projections are not modelled."
+                ] if requested_crime else [],
+            },
+            "signal": f"3-month statistical outlook covering {len(cats)} case categories",
+            "strength": "moderate",
+            "evidence_sources": ["forecasting"],
+        })
+
+    def _derive_next_best_action(self, plan: dict, findings: list,
+                                 derived: dict) -> None:
+        """Runs NextBestActionEngine over the fused findings of this run."""
+        if not findings:
+            derived["answer"] = (
+                "Next-best-action analysis is derived from the current "
+                "investigation's evidence. Run a case/analysis query first "
+                "(for example \u201canalyse FIR <number>\u201d or \u201cfind cases "
+                "similar to FIR <number>\u201d), then ask for recommended next steps."
+            )
+            return
+        try:
+            from engines.next_best_action import NextBestActionEngine
+            mini = {"investigation": {"findings": findings, "plan": plan}}
+            nba = NextBestActionEngine().generate_next_actions(mini)
+        except Exception as e:
+            derived["answer"] = f"Next-best-action analysis failed: {str(e)[:120]}"
+            return
+        leads = nba.get("leads") or []
+        if not leads:
+            derived["answer"] = (
+                "No actionable investigative leads could be derived — the "
+                "current evidence is too thin to recommend next steps."
+            )
+            return
+        top = leads[:3]
+        lines = [f"\u2022 {l.get('action_label') or l.get('reason', '')} (priority {l.get('priority_score')}) — {l.get('reason', '')}" for l in top]
+        derived["answer"] = (
+            f"Recommended next steps ({len(leads)} ranked leads):\n" + "\n".join(lines)
+            + "\n\nThese are generated from the investigation's own evidence; "
+            "review them before acting."
+        )
+        derived["findings"].append({
+            "engine": "next_best_action",
+            "type": "next_actions",
+            "category": "Next Best Actions",
+            "description": f"{len(leads)} ranked investigative leads derived from this "
+                            "investigation's own evidence.",
+            "data": {"leads": leads, "total_leads": nba.get("total_leads", len(leads))},
+            "signal": f"{len(leads)} ranked investigative leads from current evidence",
+            "strength": "moderate",
+            "evidence_sources": ["next_best_action"],
+        })
+
+    def _derive_evidence_graph(self, plan: dict, findings: list,
+                               derived: dict) -> None:
+        """Evidence-graph intent: needs fused findings to map."""
+        if not findings:
+            derived["answer"] = (
+                "An evidence graph maps the entities already discovered by an "
+                "investigation. Run an analysis first (for example a case "
+                "search or network query), then ask to map the evidence graph."
+            )
+            return
+        # The combined evidence graph is always derived post-fusion for any
+        # investigation with findings and carried in the graph payload — the
+        # normal summary already describes the findings. No override needed
+        # (and no mastermind/conspiracy inference is ever added).
+
     def run_investigation(self, request_text: str, rbac_filter: str,
                           conversation_history: list = None,
                           investigation_context: dict = None,
@@ -2983,6 +3195,13 @@ class InvestigationEngine:
         # deterministic, record-verified answer text (crime, status, station,
         # registration date, verification yes/no) is carried into the response.
         # The LLM synthesizer never re-derives these facts.
+        #
+        # Analysis-anchored questions ("find cases similar to FIR X", "show the
+        # financial trail for FIR X") DECLINE the deterministic answer in
+        # try_handle (analysis_anchor=True); the FIR is their ENTITY, not the
+        # answer. They still need the record resolved to CaseMasterID so the
+        # analysis engines run on the right anchor — detect_and_lookup does that
+        # without generating the lookup-style answer.
         try:
             exact_result = ExactCaseResolver().try_handle(request_text, rbac_filter=rbac_filter)
         except Exception:
@@ -3040,6 +3259,53 @@ class InvestigationEngine:
                 # Invalid identifier: no engines run on a broadened scope
                 plan["engines"] = ["case_query"]
                 plan["entities"] = {"case_ids": [], "accused_ids": []}
+        elif exact_result.get("analysis_anchor") and exact_result.get("case_identifier"):
+            # Analysis anchored on an identified case/FIR: resolve the record to
+            # a CaseMasterID (the analysis anchor) but keep the analysis intent
+            # and engines — never substitute the FIR's own details for the
+            # requested analysis. Only fires when the query actually NAMES an
+            # identifier (analysis words alone, e.g. "similar modus operandi to
+            # a break-in", must keep the plain narrative path).
+            try:
+                det = ExactCaseResolver().detect_and_lookup(request_text, rbac_filter=rbac_filter)
+            except Exception:
+                det = {"found": False}
+            if det.get("found") and det.get("record"):
+                rec = det.get("record") or {}
+                exact_case = {
+                    "found": True,
+                    "identifier": det.get("identifier"),
+                    "case_id_hint": det.get("key_used"),
+                    "record": rec,
+                    "case_master_id": det.get("case_master_id"),
+                    "crime_no": rec.get("crimeno") or det.get("crime_no"),
+                    "crime_sub_head": det.get("crime_sub_head"),
+                    "crime_head": det.get("crime_head"),
+                    "district": det.get("district"),
+                    "station": det.get("station"),
+                    "registered": det.get("registered"),
+                    "status": det.get("status"),
+                    "accused_ids": det.get("accused_ids", []),
+                    "answer": None,  # analysis engines produce the answer
+                    "intent": None,
+                }
+                plan["exact_case"] = exact_case
+                plan.setdefault("entities", {"case_ids": [], "accused_ids": []})
+                plan["entities"]["case_ids"] = [exact_case["case_master_id"]]
+            else:
+                # Identifier given but not found in authorized records — the
+                # orchestrator turns this into a "not found" scope error; no
+                # analysis runs on a phantom case.
+                plan["exact_case"] = {
+                    "found": False,
+                    "identifier": (exact_result or {}).get("case_identifier")
+                    or (det or {}).get("identifier"),
+                    "record": None,
+                    "case_master_id": None,
+                    "answer": None,
+                }
+                plan["engines"] = ["case_query"]
+                plan["entities"] = {"case_ids": [], "accused_ids": []}
 
         # Step 2: Execute engines according to plan
         evidence_items = self.orchestrator.execute_plan(
@@ -3057,8 +3323,30 @@ class InvestigationEngine:
         # Step 3: Fuse evidence
         fused_result = self.fusion.fuse(evidence_items, plan.get("investigation_type", ""))
 
+        # Step 3.5: Derived engines (forecasting / next-best-action /
+        # evidence-graph) run on the fused findings. They are appended as
+        # first-class findings and their deterministic answer text overrides
+        # the generic summary so a planned-but-not-runnable engine never
+        # reports a misleading "no evidence" result.
+        derived = self._derive_engine_outputs(request_text, plan,
+                                              fused_result.get("findings", []),
+                                              rbac_filter)
+        extra_findings = derived.get("findings") or []
+        if extra_findings:
+            fused_result.setdefault("findings", []).extend(extra_findings)
+            stats = fused_result.get("summary_stats") or {}
+            stats["total_findings"] = len(fused_result.get("findings", []))
+            executed_derived = sorted({f.get("engine") for f in extra_findings})
+            if executed_derived:
+                prev_exec = stats.get("engines_executed", 0) or 0
+                stats["engines_executed"] = prev_exec + len(executed_derived)
+                stats["engines_succeeded"] = (stats.get("engines_succeeded", 0) or 0) + len(executed_derived)
+
         # Step 4: Build response
         response = self.builder.build_response(plan, fused_result)
+        if derived.get("answer"):
+            # Deterministic, engine-grounded answer for derived intents
+            response["answer"] = derived["answer"]
 
         # Step 5: Structured routing decision log (requirement: every routing
         # decision visible for debugging: query → intent → entities → scope →
