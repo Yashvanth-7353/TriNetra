@@ -1020,6 +1020,43 @@ export function isInvestigationRequest(query: string): boolean {
     /\bsimilar (cases|firs?|crimes)/i,
     /\bsame (modus operandi|mo|pattern)/i,
     /\bwho (else|all) is (connected|linked|involved)/i,
+    // ── MO / narrative similarity ("similar modus operandi to a break-in",
+    // "similar method", "cases like this") must reach the multi-engine
+    // pipeline — never the factual lookup route.
+    /\bsimilar (modus operandi|mo|method|pattern|narrative|incidents?|offence|technique|approach)/i,
+    /\bsame (method|modus operandi|mo|technique)/i,
+    /\b(cases?|incidents?) (like this|with the same method|with a similar)/i,
+    /\bcomparable cases?/i,
+    // ── Pattern analysis ("recurring pattern", "common MO", "crime pattern",
+    //    "cluster") — must never land on the trend/factual chat route.
+    /\b(recurring|repeated|repeating|emerging|common|crime)\b[^\n]{0,40}\b(pattern|patterns|modus operandi|mo)\b/i,
+    /\b(pattern|patterns|modus operandi|mo)\b[^\n]{0,40}\b(recurring|repeated|repeating|emerging|common)\b/i,
+    /\bclusters? of|clustering\b/i,
+    /\bfollowing a pattern|follows? a pattern/i,
+    /\bconnected by (method|modus operandi|mo)\b/i,
+    // ── Trend analysis with time-series language — analysis, not a listing.
+    /\btrend(s|ing)?\b/i,
+    /\b(increas|decreas|rise|fall|spike|drop|surge|decline|grow(ing|th)?)\b[^\n]{0,30}\b(crime|theft|burglary|cases|incidents)\b/i,
+    /\bover (the )?last \d+ months?|monthly trend|yearly trend|frequency by month|time[- ]series/i,
+    /\bhow has .{0,40} changed/i,
+    // ── Financial / money / accounts / transactions
+    /\b(financial|money|bank accounts?|accounts? associated|transactions?|money trail|funded|financially)/i,
+    // ── Network follow-ups ("who is connected to it", "are they linked")
+    /\bwho is connected to (it|this|him|her|them)\b/i,
+    /\bare (they|any of them|these people|those people) (connected|linked|associated|related)\b/i,
+    /\bconnections? between|co[- ]accused|syndicate|crime ring|mastermind|ringleader/i,
+    // ── Risk profiling
+    /\brisk (profile|score|assessment)|reoffend|repeat offender|high[- ]risk/i,
+    // ── Forecasting
+    /\bforecast|predict(ed|ing)? (crime|cases|hotspots)|future hotspots/i,
+    // ── Next best action
+    /\bwhat should (investigators?|we|i|they) (do|focus on|prioritize)|next (best )?(investigative )?steps?|recommended action/i,
+    // ── Entity-first: an exact FIR/case ID (>= 12 digits) paired with an
+    // analysis verb must reach the multi-engine pipeline so the exact case
+    // context is retained ("who is connected to FIR X", "financial links of
+    // case X"). Pure fact questions about an ID stay on the chat route.
+    /\b\d{12,}\b[^\n]*\b(connected|linked|network|relationship|financial|transaction|money|evidence|accused|suspects?|involved|similar|victim|associates?|modus operandi|pattern)\b/i,
+    /\b(connected|linked|network|financial|transactions?|money trail|evidence graph)\b[^\n]*\b\d{12,}\b/i,
   ];
   return investigationPatterns.some(p => p.test(lower));
 }

@@ -1,11 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, fetchNextBestActions, exportChat, transcribeAudio, translateText, type EvidenceEdge, type EvidenceNode, type NextBestActionLead } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 import EvidenceGraph from '../components/EvidenceGraph';
 import EvidencePanel from '../components/EvidencePanel';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 export interface Message {
   id: string;
@@ -646,6 +646,10 @@ export default function AskTriNetra() {
 
 function FactualLookupResult({ scope, records }: { scope: any; records: any[] }) {
   const chips: { label: string; value: string; ok?: boolean }[] = [];
+  const isExact = scope?.type === 'exact_case_lookup';
+  if (isExact && scope?.case_id) {
+    chips.push({ label: 'Case', value: String(scope.case_id), ok: scope.status !== 'failed' });
+  }
   if (scope?.location_resolved) {
     chips.push({ label: 'Location', value: scope.location_resolved, ok: true });
   }
@@ -852,7 +856,6 @@ function InvestigationFindings({ findings, stats, plan, evidenceGraph, evidenceI
   const displayFindings = findings.filter(f =>
     f.category !== 'Investigation Overview' && f.category !== 'Engine Failures'
   );
-  const overview = findings.find(f => f.category === 'Investigation Overview');
   const errors = findings.find(f => f.category === 'Engine Failures');
 
   const hasGraph = evidenceGraph && evidenceGraph.nodes.length > 0;
@@ -1297,7 +1300,7 @@ function InvestigationFindings({ findings, stats, plan, evidenceGraph, evidenceI
 //  NEXT BEST INVESTIGATIVE ACTIONS COMPONENT
 // ════════════════════════════════════════════════════════════════
 
-function NextBestActions({ leads, methodology, limitations }: {
+function NextBestActions({ leads, methodology, limitations: _limitations }: {
   leads: NextBestActionLead[];
   methodology: string;
   limitations: string[];
@@ -1571,6 +1574,8 @@ function InvestigationScope({ scope }: { scope: any }) {
   const crime = scope.crime || {};
   const district = scope.district || {};
   const tw = scope.time_window || {};
+  // Entity-first exact case lookups: one record, show the resolved FIR/case
+  const exact = scope.exact_case || null;
 
   const statusConfig: Record<string, { label: string; cls: string }> = {
     verified: { label: '✓ Scope verified', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
@@ -1587,12 +1592,19 @@ function InvestigationScope({ scope }: { scope: any }) {
         <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full border', cfg.cls)}>{cfg.label}</span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 px-3 py-2">
+        {exact && (
+          <ScopeItem
+            label="Case"
+            value={exact.crime_no || exact.identifier || '—'}
+            resolved={!!exact.record_found}
+          />
+        )}
         <ScopeItem label="Crime" value={crime.resolved_name || crime.requested || '—'} resolved={!!crime.resolved} />
         <ScopeItem label="Location" value={district.resolved_name || district.requested || '—'} resolved={!!district.resolved} />
         <ScopeItem label="Period" value={tw.label || tw.requested || '—'} resolved={!!tw.resolved} />
         <ScopeItem
           label="Engines"
-          value={(scope.engines || []).length > 0 ? (scope.engines as string[]).map(e => e.replace('_', ' ')).join(' • ') : '—'}
+          value={(scope.engines || []).length > 0 ? (scope.engines as string[]).map(e => e.replace('_', ' ')).join(' • ') : (exact ? 'exact case lookup' : '—')}
           resolved={true}
         />
       </div>

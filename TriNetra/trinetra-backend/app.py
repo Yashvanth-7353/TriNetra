@@ -29,6 +29,7 @@ network_engine = NetworkEngine()
 from engines.sarvam_engine import sarvam_engine
 from engines.investigation import InvestigationEngine
 from engines.factual_lookup import FactualCaseLookup
+from engines.exact_case import ExactCaseResolver
 from engines.evidence_graph import EvidenceGraphBuilder
 from engines.forecasting import CrimeForecastingEngine
 from engines.predictive_hotspots import PredictiveHotspotEngine
@@ -472,9 +473,57 @@ def set_investigation_context(session_id: str, investigation_result: dict):
             aid = node.get("accused_id")
             if aid:
                 session_store[session_id]["investigation"]["discovered_accused"].append(int(aid))
+    # Also capture plan entities (e.g. the exact-case entity and its accused),
+    # so follow-ups like "show the financial trail" reuse them.
+    plan = investigation_result.get("investigation", {}).get("plan", {}) or {}
+    for cid in (plan.get("entities", {}) or {}).get("case_ids", []) or []:
+        if cid:
+            session_store[session_id]["investigation"]["discovered_cases"].append(int(cid))
+    for aid in (plan.get("entities", {}) or {}).get("accused_ids", []) or []:
+        if aid:
+            session_store[session_id]["investigation"]["discovered_accused"].append(int(aid))
+    for aid in (plan.get("exact_case") or {}).get("accused_ids", []) or []:
+        if aid:
+            session_store[session_id]["investigation"]["discovered_accused"].append(int(aid))
     # Deduplicate
     session_store[session_id]["investigation"]["discovered_cases"] = list(set(session_store[session_id]["investigation"]["discovered_cases"]))
     session_store[session_id]["investigation"]["discovered_accused"] = list(set(session_store[session_id]["investigation"]["discovered_accused"]))
+
+
+def store_exact_case_context(session_id: str, exact_result: dict):
+    """
+    Stores an exact-case answer as investigation context so a follow-up like
+    "who is connected to it?" retains the exact FIR instead of resetting to a
+    state-wide search. The stored scope deliberately carries NO crime/location
+    filters — the discovered case ID is the context, never a broad filter.
+    """
+    current_time = time.time()
+    if session_id not in session_store:
+        session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
+    record = (exact_result.get("cases") or [None])[0]
+    discovered_cases = []
+    discovered_accused = []
+    if record and record.get("casemasterid"):
+        discovered_cases.append(int(record["casemasterid"]))
+    for a in exact_result.get("accused") or []:
+        if a.get("accused_id"):
+            discovered_accused.append(int(a["accused_id"]))
+    session_store[session_id]["investigation"] = {
+        "plan": {
+            "filters": {
+                "crime_category": None,
+                "district_name": None,
+                "time_window": None,
+                "limit": None,
+            },
+            "engines": ["case_query"],
+        },
+        "resolved_scope": exact_result.get("scope") or {},
+        "discovered_cases": discovered_cases,
+        "discovered_accused": discovered_accused,
+        "timestamp": current_time,
+    }
+
 
 def _rbac_scope_label(rbac_filter: str, role: str) -> str:
     """Human-readable label for the server-generated RBAC condition."""
@@ -541,7 +590,11 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
         if active_memory:
             standalone_q = router_engine.rewrite_to_standalone(request.query, active_memory)
 
-        intent_profile = router_engine.classify_intent(standalone_q)
+        # Pass the previous investigation context so follow-ups like
+        # "show the financial trail" are classified as context-requiring
+        # intents (never a broad case search).
+        inv_ctx = get_investigation_context(request.session_token)
+        intent_profile = router_engine.classify_intent(standalone_q, investigation_context=inv_ctx)
         target_engine = intent_profile["engine"]
 
         answer_text = ""
@@ -554,7 +607,71 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
         case_records = []
         lookup_scope = None
 
-        if target_engine in ["factual_lookup", "trend_analysis"]:
+        # ── ENTITY-FIRST: exact case/FIR detection overrides everything ──
+        # A question that names a specific FIR/case must resolve THAT record.
+        # Crime/location words in such questions are verification, never broad
+        # filters. This runs before engine dispatch so a classifier mistake can
+        # never send an exact-ID question to RAG/pattern/broad case search.
+        exact_result = ExactCaseResolver().try_handle(
+            standalone_q, rbac_filter=rbac_sql_filter, auth_ctx=auth_ctx
+        )
+        if exact_result.get("handled"):
+            answer_text = exact_result["answer"]
+            citations_array = exact_result.get("citations", [])
+            row_count_log = exact_result.get("total_count", 0)
+            resolved_query_log = exact_result.get("resolved_query", "")
+            execution_detail = exact_result.get("execution_detail", "")
+            case_records = exact_result.get("cases", [])
+            lookup_scope = exact_result.get("scope")
+            target_engine = "exact_case_lookup"
+            # Keep the exact FIR as investigation context for follow-ups
+            store_exact_case_context(request.session_token, exact_result)
+
+        # ── Multi-engine analysis intents ──
+        # Pattern / MO-similarity / financial / network / trend / forecasting /
+        # next-best-action questions run through the investigation pipeline so
+        # they get deterministic scope resolution, the entity firewall (never a
+        # broad case list), evidence fusion and the structured response. The
+        # session's investigation context is passed so follow-ups ("show the
+        # financial trail", "who is connected to it?") keep their entities.
+        delegated_result = None
+        if not exact_result.get("handled") and target_engine in (
+            "pattern_detection", "narrative_rag", "financial_intelligence",
+            "criminal_network", "case_similarity", "forecasting",
+            "next_best_action", "trend_analysis", "investigation",
+        ):
+            delegated_result = investigation_engine.run_investigation(
+                request_text=standalone_q,
+                rbac_filter=rbac_sql_filter,
+                conversation_history=active_memory,
+                investigation_context=inv_ctx,
+                nl2sql_engine=nl2sql_engine,
+                rag_engine=rag_engine,
+                graph_engine=graph_engine,
+                network_engine=network_engine,
+                pattern_engine=pattern_engine,
+                analytics_engine=analytics_engine,
+                case_explorer_engine=case_explorer_engine,
+            )
+            set_investigation_context(request.session_token, delegated_result)
+            target_engine = delegated_result.get("intent_detected") or target_engine
+            answer_text = delegated_result.get("answer", "")
+            citations_array = delegated_result.get("citations", [])
+            row_count_log = len(citations_array)
+            resolved_query_log = "MULTI_ENGINE_DELEGATED"
+            execution_detail = (
+                "Delegated to multi-engine investigation pipeline: "
+                + ", ".join(
+                    delegated_result.get("investigation", {}).get("plan", {}).get("engines", []) or []
+                )
+            )
+            case_records = delegated_result.get("case_records") or []
+            graph_payload = delegated_result.get("graph_data")
+            analytics_payload = delegated_result.get("analytics_data")
+
+        # ── General dispatch (only reached when no exact case identifier and
+        #    no delegation to the investigation pipeline) ──
+        if delegated_result is None and target_engine in ["factual_lookup", "trend_analysis"]:
             trend_instruction = ""
             if target_engine == "trend_analysis":
                 trend_instruction = " FORCE TREND FORMAT: Group by month. Select exactly two columns: 'month' (e.g. TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM')) and 'count'."
@@ -611,7 +728,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                         citations_array = [str(c) for c in extracted_citations if c][:5]
                         execution_detail = f"RBAC applied ({user_role}). Executed Query."
 
-        elif target_engine == "narrative_rag":
+        elif delegated_result is None and target_engine == "narrative_rag":
             # For Milestone 2/3, we pass standard RAG. 
             # Note: You can apply the same RBAC logic to the RAG vector search in the future!
             rag_result = rag_engine.search_and_summarize(standalone_q)
@@ -621,7 +738,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 citations_array = rag_result["citations"]
                 row_count_log = len(citations_array)
                 
-        elif target_engine == "risk_profile":
+        elif delegated_result is None and target_engine == "risk_profile":
             accused_id = router_engine.extract_accused_id(standalone_q)
             if accused_id == 0:
                 answer_text = "Please specify an Accused ID to retrieve their risk profile."
@@ -640,7 +757,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 
 
         # ... (Inside the branching logic) ...
-        elif target_engine == "criminal_network":
+        elif delegated_result is None and target_engine == "criminal_network":
             # 1. Extract the ID from the query
             accused_id = router_engine.extract_accused_id(standalone_q)
 
@@ -669,7 +786,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 
                     graph_payload = graph_result  # ADD THIS LINE
 
-        elif target_engine == "case_similarity":
+        elif delegated_result is None and target_engine == "case_similarity":
             # 1. Extract the CaseMasterID from the query. Let's reuse extract_accused_id logic or regex it.
             match = re.search(r'\d+', standalone_q)
             target_case_id = int(match.group()) if match else 0
@@ -697,7 +814,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                         
                     execution_detail = f"Executed Tri-Signal pgvector similarity search for Case ID {target_case_id}."
 
-        else:
+        elif delegated_result is None and target_engine not in ("exact_case_lookup",):
             answer_text = "Routed to Analytics endpoint (Milestone 4)."
             execution_detail = "Routing placeholder."
 
@@ -713,6 +830,19 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 
         active_memory.append({"role": "user", "text": request.query})
         active_memory.append({"role": "assistant", "text": answer_text})
+
+        if delegated_result is not None:
+            # Multi-engine delegation returns the full investigation payload
+            # (plan, findings, evidence inventory, routing log, graph/analytics).
+            delegated_result["intent_detected"] = target_engine
+            delegated_result["reasoning_trace"] = {
+                "execution_steps": [
+                    {"step": 1, "action": "Security Check", "detail": _rbac_scope_label(rbac_sql_filter, user_role)},
+                    {"step": 2, "action": "Intent Target", "detail": f"{target_engine} ({intent_profile.get('reasoning', 'classified')})"},
+                    {"step": 3, "action": "Execution", "detail": execution_detail}
+                ]
+            }
+            return delegated_result
 
         return {
             "status": "success",
