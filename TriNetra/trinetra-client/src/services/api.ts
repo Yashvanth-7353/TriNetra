@@ -699,22 +699,6 @@ export async function fetchAnalyticsReportingLag(params: AnalyticsSearchParams):
   return response.json();
 }
 
-export interface AnalyticsFinancialResponse {
-  status: string;
-  transactions: { month: string; amount: number; count: number }[];
-  banks: { name: string; accounts: number }[];
-}
-
-export async function fetchAnalyticsFinancial(params: AnalyticsSearchParams): Promise<AnalyticsFinancialResponse> {
-  const queryParts: string[] = [];
-  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
-  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
-  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
-  const response = await fetch(`${API_BASE}/api/analytics/financial${qs}`, { headers: authHeaders() });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
 export interface AnalyticsDemographicsResponse {
   status: string;
   victims: { age_band: string; gender: string; count: number }[];
