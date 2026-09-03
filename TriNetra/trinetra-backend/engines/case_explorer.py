@@ -52,15 +52,28 @@ class CaseExplorerEngine:
         self,
         district_id: int = None,
         status_id: int = None,
+        status_ids: list = None,
         category_id: int = None,
         crime_head_id: int = None,
+        crime_sub_head_id: int = None,
         date_from: str = None,
         date_to: str = None,
         search_term: str = None,
         page: int = 1,
         page_size: int = 20,
+        unit_ids: list = None,
+        rbac_filter: str = None,
     ) -> dict:
-        """Paginated, filterable case search with JOINed display names."""
+        """Paginated, filterable case search with JOINed display names.
+
+        Args:
+            unit_ids: Optional list of UnitIDs (police stations) to restrict to.
+            rbac_filter: Optional server-generated row-level security condition
+                (e.g. "cm.PoliceStationID = 19" or "u.DistrictID = 5" or "1=1").
+                Appended as a mandatory AND condition — never user-supplied.
+            crime_sub_head_id: Specific CrimeSubHeadID (e.g. Motor Vehicle Theft)
+                applied directly as cm.CrimeMinorHeadID.
+        """
         try:
             conn = self._get_conn()
             cur = conn.cursor()
@@ -75,12 +88,26 @@ class CaseExplorerEngine:
             if status_id:
                 conditions.append("cm.CaseStatusID = %s")
                 params.append(status_id)
+            if status_ids:
+                conditions.append("cm.CaseStatusID = ANY(%s)")
+                params.append(list(status_ids))
             if category_id:
                 conditions.append("cm.CaseCategoryID = %s")
                 params.append(category_id)
             if crime_head_id:
                 conditions.append("cm.CrimeMajorHeadID = %s")
                 params.append(crime_head_id)
+            if crime_sub_head_id:
+                conditions.append("cm.CrimeMinorHeadID = %s")
+                params.append(crime_sub_head_id)
+            if unit_ids:
+                conditions.append("u.UnitID = ANY(%s)")
+                params.append(list(unit_ids))
+            if rbac_filter and rbac_filter.strip() not in ("", "1=1"):
+                # Server-generated RBAC condition — inject as a hard AND.
+                # Basic hygiene: reject anything that looks like statement injection.
+                if ";" not in rbac_filter and "--" not in rbac_filter:
+                    conditions.append(f"({rbac_filter})")
             if date_from:
                 conditions.append("cm.CrimeRegisteredDate >= %s")
                 params.append(date_from)

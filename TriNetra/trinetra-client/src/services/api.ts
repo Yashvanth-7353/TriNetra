@@ -83,6 +83,21 @@ export interface ChatResponse {
   citations: string[];
   graph_data: GraphData | null;
   analytics_data: AnalyticsPayload | null;
+  /** Deterministic factual case lookup results (simple database questions). */
+  case_records?: any[];
+  lookup_scope?: {
+    type?: string;
+    /** Scope verification: 'verified' | 'failed' | 'partial' | 'not_specified' */
+    status?: string;
+    location_requested?: string | null;
+    location_resolved?: string | null;
+    period?: string | null;
+    crime?: string | null;
+    /** Case status filter applied (e.g. 'Charge Sheeted'), if any. */
+    case_status?: string | null;
+    records_found?: number;
+    access?: string;
+  } | null;
   reasoning_trace: {
     execution_steps: ReasoningStep[];
   };
@@ -988,6 +1003,23 @@ export function isInvestigationRequest(query: string): boolean {
     /\bfinancial.*trail/i,
     /\bmoney.*trail/i,
     /\b关联/i,
+    // ── Follow-up / investigation-scoped routing ──
+    // Follow-ups that reference the previous investigation ("which ones",
+    // "these suspects") must reach /api/investigate so the backend can
+    // resolve them against the stored investigation context.
+    /\bwhich ones?\b/i,
+    /\bthese (suspects|accused|offenders|cases|people)\b/i,
+    /\bthose (suspects|accused|offenders|cases|people)\b/i,
+    /\bany of (these|those|them)\b/i,
+    /\b(financial|money).*(connect|link|relationship)/i,
+    /\b(connect|link).*(financially|financial|money)/i,
+    /\bare.*(suspects|accused).*(connected|linked)/i,
+    /\b(connected|linked).*(suspects|accused|cases)/i,
+    /\bmastermind|ringleader|organized|syndicate/i,
+    /\brepeat (offender|offending|behaviour|behavior)/i,
+    /\bsimilar (cases|firs?|crimes)/i,
+    /\bsame (modus operandi|mo|pattern)/i,
+    /\bwho (else|all) is (connected|linked|involved)/i,
   ];
   return investigationPatterns.some(p => p.test(lower));
 }

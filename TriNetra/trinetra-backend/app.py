@@ -28,6 +28,7 @@ from engines.network_engine import NetworkEngine
 network_engine = NetworkEngine()
 from engines.sarvam_engine import sarvam_engine
 from engines.investigation import InvestigationEngine
+from engines.factual_lookup import FactualCaseLookup
 from engines.evidence_graph import EvidenceGraphBuilder
 from engines.forecasting import CrimeForecastingEngine
 from engines.predictive_hotspots import PredictiveHotspotEngine
@@ -447,6 +448,7 @@ def set_investigation_context(session_id: str, investigation_result: dict):
         session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
     session_store[session_id]["investigation"] = {
         "plan": investigation_result.get("investigation", {}).get("plan", {}),
+        "resolved_scope": investigation_result.get("investigation", {}).get("plan", {}).get("resolved_scope"),
         "discovered_cases": [],
         "discovered_accused": [],
         "timestamp": current_time,
@@ -473,6 +475,18 @@ def set_investigation_context(session_id: str, investigation_result: dict):
     # Deduplicate
     session_store[session_id]["investigation"]["discovered_cases"] = list(set(session_store[session_id]["investigation"]["discovered_cases"]))
     session_store[session_id]["investigation"]["discovered_accused"] = list(set(session_store[session_id]["investigation"]["discovered_accused"]))
+
+def _rbac_scope_label(rbac_filter: str, role: str) -> str:
+    """Human-readable label for the server-generated RBAC condition."""
+    f = (rbac_filter or "").strip()
+    if f == "1=1":
+        return f"RBAC enforced ({role}) — state-wide access"
+    if "PoliceStationID" in f:
+        return f"RBAC enforced ({role}) — station-scoped access"
+    if "DistrictID" in f:
+        return f"RBAC enforced ({role}) — district-scoped access"
+    return f"RBAC enforced ({role})"
+
 
 def synthesize_structural_response(user_query: str, records: list) -> str:
     """Synthesizes database record blocks into highly pristine natural intelligence summaries."""
@@ -537,39 +551,65 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
         row_count_log = 0
         graph_payload = None  # ADD THIS LINE
         analytics_payload = None
+        case_records = []
+        lookup_scope = None
 
         if target_engine in ["factual_lookup", "trend_analysis"]:
             trend_instruction = ""
             if target_engine == "trend_analysis":
                 trend_instruction = " FORCE TREND FORMAT: Group by month. Select exactly two columns: 'month' (e.g. TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM')) and 'count'."
+
+            # ── Deterministic factual case lookup ──
+            # Simple database questions ("details about the last cases registered
+            # in Bengaluru Urban central") are handled WITHOUT the LLM: location
+            # and recency are resolved against real tables, RBAC is enforced as
+            # a mandatory condition, and the case query engine returns the actual
+            # records. NL2SQL remains the fallback for queries this path does not
+            # recognize (e.g. complex aggregations).
+            if target_engine == "factual_lookup":
+                lookup_result = FactualCaseLookup().try_lookup(
+                    standalone_q, rbac_filter=rbac_sql_filter, auth_ctx=auth_ctx
+                )
+                if lookup_result.get("handled"):
+                    answer_text = lookup_result["answer"]
+                    citations_array = lookup_result["citations"]
+                    row_count_log = lookup_result["total_count"]
+                    resolved_query_log = lookup_result["resolved_query"]
+                    execution_detail = lookup_result["execution_detail"]
+                    case_records = lookup_result.get("cases", [])
+                    lookup_scope = lookup_result.get("scope")
+                    target_engine = "case_lookup"  # UI label
+
+            # ── Fallback: LLM-to-SQL (unrecognized factual queries + all trend
+            #    queries) ──
+            if target_engine in ("factual_lookup", "trend_analysis"):
+                # Inject the security filter into the SQL generation
+                generated_sql = nl2sql_engine.generate_sql(standalone_q + trend_instruction, rbac_filter=rbac_sql_filter)
+                resolved_query_log = generated_sql
+                execution_result = nl2sql_engine.validate_and_execute(generated_sql, standalone_q)
                 
-            # Inject the security filter into the SQL generation
-            generated_sql = nl2sql_engine.generate_sql(standalone_q + trend_instruction, rbac_filter=rbac_sql_filter)
-            resolved_query_log = generated_sql
-            execution_result = nl2sql_engine.validate_and_execute(generated_sql, standalone_q)
-            
-            if "error" in execution_result:
-                answer_text = f"I couldn't execute that analysis: {execution_result['error']}"
-            else:
-                rows_payload = execution_result.get("rows", [])
-                row_count_log = len(rows_payload)
-                
-                if target_engine == "trend_analysis":
-                    trend_data = []
-                    for row in rows_payload:
-                        keys = list(row.keys())
-                        if len(keys) >= 2:
-                            trend_data.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
-                    
-                    data_points = len(trend_data)
-                    answer_text = f"I have generated a custom trend visualization spanning {data_points} data points based on your specific criteria."
-                    execution_detail = "Executed temporal NLP-to-SQL aggregation query."
-                    analytics_payload = {"type": "trend", "data": trend_data}
+                if "error" in execution_result:
+                    answer_text = f"I couldn't execute that analysis: {execution_result['error']}"
                 else:
-                    answer_text = synthesize_structural_response(standalone_q, rows_payload)
-                    extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
-                    citations_array = [str(c) for c in extracted_citations if c][:5]
-                    execution_detail = f"RBAC applied ({user_role}). Executed Query."
+                    rows_payload = execution_result.get("rows", [])
+                    row_count_log = len(rows_payload)
+                    
+                    if target_engine == "trend_analysis":
+                        trend_data = []
+                        for row in rows_payload:
+                            keys = list(row.keys())
+                            if len(keys) >= 2:
+                                trend_data.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
+                        
+                        data_points = len(trend_data)
+                        answer_text = f"I have generated a custom trend visualization spanning {data_points} data points based on your specific criteria."
+                        execution_detail = "Executed temporal NLP-to-SQL aggregation query."
+                        analytics_payload = {"type": "trend", "data": trend_data}
+                    else:
+                        answer_text = synthesize_structural_response(standalone_q, rows_payload)
+                        extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
+                        citations_array = [str(c) for c in extracted_citations if c][:5]
+                        execution_detail = f"RBAC applied ({user_role}). Executed Query."
 
         elif target_engine == "narrative_rag":
             # For Milestone 2/3, we pass standard RAG. 
@@ -681,10 +721,12 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
             "citations": citations_array,
             "graph_data": graph_payload, # ADD THIS LINE
             "analytics_data": analytics_payload, # ADD THIS LINE
+            "case_records": case_records,
+            "lookup_scope": lookup_scope,
             "reasoning_trace": {
                 "execution_steps": [
-                    {"step": 1, "action": f"Security Check ({user_role})", "detail": f"Filter applied: {rbac_sql_filter}"},
-                    {"step": 2, "action": "Intent Target", "detail": intent_profile["reasoning"]},
+                    {"step": 1, "action": "Security Check", "detail": _rbac_scope_label(rbac_sql_filter, user_role)},
+                    {"step": 2, "action": "Intent Target", "detail": f"{target_engine} ({intent_profile.get('reasoning', 'classified')})"},
                     {"step": 3, "action": "Execution", "detail": execution_detail}
                 ]
             }
@@ -748,6 +790,7 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
             request_text=request.query,
             rbac_filter=rbac_sql_filter,
             conversation_history=extended_history,
+            investigation_context=investigation_context,
             nl2sql_engine=nl2sql_engine,
             rag_engine=rag_engine,
             graph_engine=graph_engine,
