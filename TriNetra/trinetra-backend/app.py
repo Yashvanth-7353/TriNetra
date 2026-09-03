@@ -33,6 +33,7 @@ from engines.factual_lookup import FactualCaseLookup
 from engines.exact_case import ExactCaseResolver
 from engines.evidence_graph import EvidenceGraphBuilder
 from engines.forecasting import CrimeForecastingEngine
+from engines.prevention_alerts import PreventionAlertsEngine
 from engines.predictive_hotspots import PredictiveHotspotEngine
 from engines.next_best_action import NextBestActionEngine
 from engines.financial_intelligence import FinancialIntelligenceEngine, FinancialLeadGenerator
@@ -45,6 +46,7 @@ predictive_hotspot_engine = PredictiveHotspotEngine()
 next_best_action_engine = NextBestActionEngine()
 financial_intelligence_engine = FinancialIntelligenceEngine()
 financial_lead_generator = FinancialLeadGenerator()
+prevention_alerts_engine = PreventionAlertsEngine()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -378,19 +380,24 @@ async def get_analytics_alerts(
     district_id: Optional[int] = Query(None),
     authorization: Optional[str] = Header(None)
 ):
-    """Returns prevention alerts computed for the logged in employee jurisdiction only."""
+    """Returns prevention alerts computed for the logged in employee jurisdiction only.
+
+    Jurisdiction is resolved server-side from the authenticated profile:
+    Investigator → own station, Supervisor → own district, Analyst/Policymaker →
+    state-wide (optionally narrowed by district_id). An explicit district_id can
+    never widen a jurisdiction-bound role's scope.
+    """
     auth_ctx = _require_auth(authorization)
-    if _is_statewide_role(auth_ctx["role"]):
-        # Honor an explicit selection; otherwise default to the officer's own district
-        district_id = district_id or auth_ctx.get("district_id")
-    else:
-        district_id = auth_ctx.get("district_id")
-    if not district_id:
-        raise HTTPException(status_code=400, detail="A district is required for prevention alerts.")
-    result = analytics_engine.get_prevention_alerts(district_id=district_id)
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-    return {"status": "success", **result}
+    result = prevention_alerts_engine.generate_alerts(
+        role=auth_ctx["role"],
+        employee_district_id=auth_ctx.get("district_id"),
+        employee_unit_id=auth_ctx.get("unit_id"),
+        requested_district_id=district_id,
+    )
+    if result.get("status") in ("denied", "error"):
+        status_code = 403 if result.get("status") == "denied" else 500
+        raise HTTPException(status_code=status_code, detail=result.get("error") or "Prevention alerts engine error.")
+    return result
 
 
 @app.get("/api/analytics/geographic")
