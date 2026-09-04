@@ -205,12 +205,16 @@ class LocationResolver:
         # 3b) A phrase TOKEN matches a district name token ("registered in
         #    bengaluru" has no "urban", but its "bengaluru" token identifies
         #    Bengaluru Urban). Prefer the tightest district; urban wins ties.
+        #    Tokens must match EXACTLY or be a substantial prefix (>= 5 chars)
+        #    of a district token: a 4-char word like "have" must never fuzzy-
+        #    match the district "Haveri" ("have the status Charge Sheeted"
+        #    must not silently become a Haveri query).
         phrase_tokens = {t for t in norm_phrase.split() if len(t) >= 4}
         token_matches = []
         for d in LocationResolver._districts:
             dn_tokens = set(d["norm"].split())
             for pt in phrase_tokens:
-                if any(pt in dt or dt in pt for dt in dn_tokens):
+                if any(pt == dt or (len(pt) >= 5 and (dt.startswith(pt) or pt.startswith(dt))) for dt in dn_tokens):
                     token_matches.append(d)
                     break
         if token_matches:

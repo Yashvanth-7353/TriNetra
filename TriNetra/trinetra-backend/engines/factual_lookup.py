@@ -57,6 +57,10 @@ _THIS_MONTH = re.compile(r"\bthis (month|year)\b", re.IGNORECASE)
 _LAST_PERIOD = re.compile(
     r"\blast\s+(\d{1,2})\s+(day|week|month|year)s?\b", re.IGNORECASE
 )
+# Explicit calendar years ("in 2025", "during 2024", "2025"). The year must
+# not be embedded in a longer number (crime numbers like ...202600015) and is
+# skipped when the query is an FIR-number search, where "2025" is a record id.
+_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 _YESTERDAY = re.compile(r"\byesterday\b", re.IGNORECASE)
 _TODAY = re.compile(r"\btoday\b", re.IGNORECASE)
 
@@ -180,7 +184,13 @@ class FactualCaseLookup:
             spec["recency"] = "recent" if re.search(r"\brecent(ly)?\b", ql) else "latest"
 
         today = datetime.now()
-        if _THIS_MONTH.search(ql):
+        year_m = None if spec["keyword"] else _YEAR.search(ql)
+        if year_m:
+            year = int(year_m.group(0))
+            spec["date_from"] = f"{year}-01-01"
+            spec["date_to"] = f"{year}-12-31"
+            spec["period_label"] = str(year)
+        elif _THIS_MONTH.search(ql):
             spec["date_from"] = today.replace(day=1).strftime("%Y-%m-%d")
             spec["period_label"] = "This month"
         else:
@@ -318,10 +328,14 @@ class FactualCaseLookup:
         if m:
             tail = m.group(1).strip().rstrip(". ,;!?").strip()
             # Reject clause-like tails ("of these cases involve the same
-            # accused") — they are references, not locations.
+            # accused") — they are references, not locations. Also reject
+            # filler tails ("in total", "in the system") that never name a
+            # place, so "murder cases in total" stays location-less instead of
+            # failing as an unresolvable "location".
             if not re.search(
                 r"\b(cases?|firs?|accused|suspect|offender|involve|involved|"
-                r"registered|crime|pattern|network|connected|linked)\b",
+                r"registered|crime|pattern|network|connected|linked|total|all|"
+                r"statewide|overall|entire|system|database|current|whole)\b",
                 tail,
                 re.IGNORECASE,
             ):
