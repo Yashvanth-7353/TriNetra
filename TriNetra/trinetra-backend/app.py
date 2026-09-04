@@ -343,10 +343,13 @@ async def get_emerging_patterns(
     Analyst/Policymaker see the state-wide feed.
     """
     auth_ctx = _require_auth(authorization)
-    if _is_statewide_role(auth_ctx["role"]):
-        result = pattern_engine.get_emerging_patterns()
-    else:
-        result = pattern_engine.get_scoped_patterns(district_id=auth_ctx.get("district_id"))
+    rbac_filter = _jurisdiction_rbac_filter(
+        auth_ctx["role"], auth_ctx.get("district_id"), auth_ctx.get("unit_id")
+    )
+    # The feed is generated inside the caller's exact jurisdiction: a state
+    # role sees all patterns, an Investigator only clusters whose supporting
+    # FIRs are at their own station, a Supervisor only their own district.
+    result = pattern_engine.get_emerging_patterns(rbac_filter=rbac_filter)
     if "error" in result or result.get("status") == "error":
         raise HTTPException(status_code=500, detail=result.get("error") or "Pattern engine error.")
     return {"status": "success", **result}
@@ -369,7 +372,12 @@ async def get_similar_cases(
     )
     if rbac_filter.strip() != "1=1" and not case_explorer_engine.is_case_in_scope(case_id, rbac_filter):
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found in authorized records.")
-    result = pattern_engine.find_similar_cases(case_id=case_id, k=k)
+    # The RBAC condition is threaded into the search so every returned
+    # similar-case candidate also sits inside the caller's jurisdiction
+    # (similarity can never become a cross-jurisdiction read channel).
+    result = pattern_engine.find_similar_cases(
+        case_id=case_id, k=k, rbac_filter=rbac_filter
+    )
     if "error" in result or result.get("status") == "error":
         raise HTTPException(status_code=500, detail=result.get("error") or "Similarity engine error.")
     return {"status": "success", **result}
@@ -575,9 +583,13 @@ async def get_network(
 session_store = {}
 SESSION_TTL_SECONDS = 1800 
 
-def access_context_memory(session_id: str) -> list:
+def access_context_memory(session_id: str, employee_id=None) -> list:
     """Safely extracts session data arrays and evicts expired records automatically."""
     current_time = time.time()
+    if employee_id is not None:
+        # Namespace memory by employee: the default session token is shared
+        # across clients, so context must never bleed between users.
+        session_id = f"{employee_id}:{session_id}"
     session_profile = session_store.get(session_id)
     
     if session_profile and (current_time - session_profile["last_active"] < SESSION_TTL_SECONDS):
@@ -587,9 +599,11 @@ def access_context_memory(session_id: str) -> list:
     session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
     return session_store[session_id]["turns"]
 
-def get_investigation_context(session_id: str) -> dict:
+def get_investigation_context(session_id: str, employee_id=None) -> dict:
     """Returns the last investigation result for multi-turn context."""
     current_time = time.time()
+    if employee_id is not None:
+        session_id = f"{employee_id}:{session_id}"
     session_profile = session_store.get(session_id)
     if session_profile and (current_time - session_profile["last_active"] < SESSION_TTL_SECONDS):
         return session_profile.get("investigation")
@@ -663,7 +677,7 @@ def _extract_context_entities(investigation_result: dict):
 
 
 def set_investigation_context(session_id: str, investigation_result: dict,
-                              request_text: str = None):
+                              request_text: str = None, employee_id=None):
     """Stores the investigation result for multi-turn follow-up queries.
 
     Follow-up turns ("show its financial trail", "who is connected to them")
@@ -672,6 +686,8 @@ def set_investigation_context(session_id: str, investigation_result: dict,
     context so the old FIR/district never leaks into it.
     """
     current_time = time.time()
+    if employee_id is not None:
+        session_id = f"{employee_id}:{session_id}"
     previous = None
     if session_id in session_store:
         prev = session_store[session_id].get("investigation")
@@ -702,7 +718,7 @@ def set_investigation_context(session_id: str, investigation_result: dict,
     }
 
 
-def store_exact_case_context(session_id: str, exact_result: dict):
+def store_exact_case_context(session_id: str, exact_result: dict, employee_id=None):
     """
     Stores an exact-case answer as investigation context so a follow-up like
     "who is connected to it?" retains the exact FIR instead of resetting to a
@@ -710,6 +726,8 @@ def store_exact_case_context(session_id: str, exact_result: dict):
     filters — the discovered case ID is the context, never a broad filter.
     """
     current_time = time.time()
+    if employee_id is not None:
+        session_id = f"{employee_id}:{session_id}"
     if session_id not in session_store:
         session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
     record = (exact_result.get("cases") or [None])[0]
@@ -797,11 +815,11 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
     )
 
     try:
-        active_memory = access_context_memory(request.session_token)
+        active_memory = access_context_memory(request.session_token, user_employee_id)
         # Pass the previous investigation context so follow-ups like
         # "show the financial trail" are classified as context-requiring
         # intents (never a broad case search).
-        inv_ctx = get_investigation_context(request.session_token)
+        inv_ctx = get_investigation_context(request.session_token, user_employee_id)
         standalone_q = request.query
 
         # Deterministic follow-up detection: when the RAW user query refers
@@ -854,7 +872,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
             lookup_scope = exact_result.get("scope")
             target_engine = "exact_case_lookup"
             # Keep the exact FIR as investigation context for follow-ups
-            store_exact_case_context(request.session_token, exact_result)
+            store_exact_case_context(request.session_token, exact_result, user_employee_id)
 
         # ── Multi-engine analysis intents ──
         # Pattern / MO-similarity / financial / network / trend / forecasting /
@@ -883,7 +901,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 case_explorer_engine=case_explorer_engine,
             )
             set_investigation_context(request.session_token, delegated_result,
-                                      request_text=standalone_q)
+                                      request_text=standalone_q, employee_id=user_employee_id)
             target_engine = delegated_result.get("intent_detected") or target_engine
             answer_text = delegated_result.get("answer", "")
             citations_array = delegated_result.get("citations", [])
@@ -933,7 +951,11 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 # Inject the security filter into the SQL generation
                 generated_sql = nl2sql_engine.generate_sql(standalone_q + trend_instruction, rbac_filter=rbac_sql_filter)
                 resolved_query_log = generated_sql
-                execution_result = nl2sql_engine.validate_and_execute(generated_sql, standalone_q)
+                # rbac_filter is passed so the execution guardrail can verify
+                # the mandatory RLS condition survived generation.
+                execution_result = nl2sql_engine.validate_and_execute(
+                    generated_sql, standalone_q, rbac_filter=rbac_sql_filter
+                )
                 
                 if "error" in execution_result:
                     answer_text = f"I couldn't execute that analysis: {execution_result['error']}"
@@ -959,9 +981,12 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                         execution_detail = f"RBAC applied ({user_role}). Executed Query."
 
         elif delegated_result is None and target_engine == "narrative_rag":
-            # For Milestone 2/3, we pass standard RAG. 
-            # Note: You can apply the same RBAC logic to the RAG vector search in the future!
-            rag_result = rag_engine.search_and_summarize(standalone_q)
+            # Jurisdiction-scoped RAG: the corpus is restricted by the caller's
+            # RBAC condition BEFORE similarity ranking, so an answer can never
+            # cite a narrative outside the caller's authorized scope.
+            rag_result = rag_engine.search_and_summarize(
+                standalone_q, rbac_filter=rbac_sql_filter
+            )
             resolved_query_log = "VECTOR_SEARCH"
             if "error" not in rag_result:
                 answer_text = rag_result["answer"]
@@ -974,53 +999,36 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 answer_text = "Please specify an Accused ID to retrieve their risk profile."
                 execution_detail = "Failed to extract Accused ID."
             else:
-                risk_result = analytics_engine.get_risk_profile(accused_id)
-                if "error" in risk_result:
-                    answer_text = f"Risk profiling failed: {risk_result['error']}"
+                # Jurisdiction guard: risk profiles may only be read for accused
+                # linked to a case inside the caller's station/district (same
+                # rule as the offender-list and network endpoints).
+                from engines.security import parse_rbac_scope as _parse_scope
+                _unit, _dist = _parse_scope(rbac_sql_filter)
+                if (_unit or _dist) and not network_engine.accused_in_scope(
+                    accused_id, unit_id=_unit, district_id=_dist
+                ):
+                    answer_text = (
+                        f"No risk profile is available for Accused {accused_id} "
+                        "in your authorized records."
+                    )
+                    execution_detail = "Accused anchor outside authorized jurisdiction."
                 else:
-                    score = risk_result["score"]
-                    answer_text = f"Risk Profile for Accused {accused_id}: Score is {score}/100. Repeat Offender: {risk_result['repeat_offender']}."
-                    execution_detail = f"Queried OffenderRiskScore table for ID {accused_id}."
-                    
-                    # ADD THIS LINE:
-                    analytics_payload = {"type": "risk", "data": risk_result}
+                    risk_result = analytics_engine.get_risk_profile(accused_id)
+                    if "error" in risk_result:
+                        answer_text = f"Risk profiling failed: {risk_result['error']}"
+                    else:
+                        score = risk_result["score"]
+                        answer_text = f"Risk Profile for Accused {accused_id}: Score is {score}/100. Repeat Offender: {risk_result['repeat_offender']}."
+                        execution_detail = f"Queried OffenderRiskScore table for ID {accused_id}."
+                        analytics_payload = {"type": "risk", "data": risk_result}
 
-
-        # ... (Inside the branching logic) ...
-        elif delegated_result is None and target_engine == "criminal_network":
-            # 1. Extract the ID from the query
-            accused_id = router_engine.extract_accused_id(standalone_q)
-
-            if accused_id == 0:
-                answer_text = "I need a specific Accused ID to map a network. For example: 'Show me the network for Accused 104'."
-                execution_detail = "Failed to extract integer Accused ID from prompt."
-            else:
-                # 2. Run the NetworkX Traversal
-                graph_result = graph_engine.network_for_accused(accused_id)
-                resolved_query_log = f"GRAPH_TRAVERSAL: AccusedID {accused_id}"
-
-                if "error" in graph_result:
-                    answer_text = f"Graph engine response: {graph_result['error']}"
-                    execution_detail = "Target node not found in precomputed graph bounds."
-                else:
-                    node_count = len(graph_result["nodes"])
-                    edge_count = len(graph_result["edges"])
-                    row_count_log = node_count
-
-                    answer_text = f"Successfully mapped the criminal syndicate. Found {node_count} linked entities and {edge_count} direct connections (co-accused and financial)."
-
-                    # Extract the case numbers from the edges to use as citations
-                    extracted_citations = [str(e["case"]) for e in graph_result["edges"] if str(e["case"]) != "None"]
-                    citations_array = list(set(extracted_citations))[:5] # Deduplicate and cap at 5
-                    execution_detail = f"Executed 2-hop Louvain network map. Displaying {node_count} nodes."
-
-                    graph_payload = graph_result  # ADD THIS LINE
 
         elif delegated_result is None and target_engine == "case_similarity":
-            # 1. Extract the CaseMasterID from the query. Let's reuse extract_accused_id logic or regex it.
+            # 1. Extract the CaseMasterID from the query (the delegated pipeline
+            # normally owns this intent; this branch stays as a safe fallback).
             match = re.search(r'\d+', standalone_q)
             target_case_id = int(match.group()) if match else 0
-            
+
             if target_case_id == 0:
                 answer_text = "I need a specific Case ID to find similarities. For example: 'Find cases similar to CaseMasterID 2817'."
                 execution_detail = "Failed to extract integer Case ID from prompt."
@@ -1029,9 +1037,16 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 # instance — a plain `import pattern_engine` here would shadow
                 # the global for the whole handler (UnboundLocalError).
                 from engines.pattern_engine import pattern_engine as _pattern_engine
-                similarity_result = _pattern_engine.find_similar_cases(target_case_id)
+                # RBAC-scoped: the anchor must be inside the caller's
+                # jurisdiction and every similar-case candidate is bounded to it
+                # as well (same rule as /api/patterns/similar).
+                similarity_result = _pattern_engine.find_similar_cases(
+                    target_case_id, rbac_filter=rbac_sql_filter
+                )
                 if "error" in similarity_result:
                     answer_text = f"Similarity engine failed: {similarity_result['error']}"
+                elif similarity_result.get("anchor_in_scope") is False:
+                    answer_text = f"No similar cases found for CaseMasterID {target_case_id} in the authorized records."
                 else:
                     matches = similarity_result.get("similar_cases", [])
                     row_count_log = len(matches)
@@ -1041,10 +1056,10 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                         answer_text = f"I found {len(matches)} highly similar cases based on narrative semantics, Modus Operandi overlaps, and spatial-temporal proximity. The strongest matches are:\n\n"
                         for m in matches[:3]:
                             answer_text += f"- **Crime No {m.get('crime_no', 'Unknown')}**: {int(m.get('match_score', 0))}% match. (Why: {', '.join(m.get('explanations', []))})\n"
-                        
+
                         extracted_citations = [m.get("crime_no") for m in matches if m.get("crime_no")]
                         citations_array = [str(c) for c in extracted_citations][:5]
-                        
+
                     execution_detail = f"Executed Tri-Signal pgvector similarity search for Case ID {target_case_id}."
 
         elif delegated_result is None and target_engine not in ("exact_case_lookup",):
@@ -1130,8 +1145,8 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
 
     try:
         # 2. Get conversation context for multi-turn investigations
-        conversation_history = access_context_memory(request.session_token)
-        investigation_context = get_investigation_context(request.session_token)
+        conversation_history = access_context_memory(request.session_token, user_employee_id)
+        investigation_context = get_investigation_context(request.session_token, user_employee_id)
 
         # Build extended history including investigation context
         extended_history = list(conversation_history)
@@ -1164,10 +1179,10 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
         )
 
         # 4. Store investigation context for multi-turn follow-up
-        set_investigation_context(request.session_token, result, request_text=request.query)
+        set_investigation_context(request.session_token, result, request_text=request.query, employee_id=user_employee_id)
 
         # 5. Log to conversation history and audit
-        active_memory = access_context_memory(request.session_token)
+        active_memory = access_context_memory(request.session_token, user_employee_id)
         active_memory.append({"role": "user", "text": request.query})
         active_memory.append({"role": "assistant", "text": result.get("answer", "")})
 
@@ -1200,15 +1215,24 @@ async def get_evidence_graph(request: EvidenceGraphRequest, authorization: Optio
     Builds a structured evidence graph from a finding.
     Returns nodes (real entities) and edges (real relationships with provenance).
     """
-    # Verify authentication
-    _extract_auth_context(authorization)
+    # Verify authentication + derive the caller's jurisdiction condition.
+    # The finding is client-supplied, so every DB-backed label lookup inside
+    # the graph builder is restricted to the caller's own jurisdiction — a
+    # crafted finding can never enumerate CrimeNos / accused names from
+    # another district's records.
+    auth_ctx = _extract_auth_context(authorization)
+    rbac_filter = security_context.build_rbac_filter(
+        role=auth_ctx["role"],
+        employee_district_id=auth_ctx["district_id"],
+        employee_unit_id=auth_ctx["unit_id"],
+    )
 
     finding = request.finding
     if not finding:
         raise HTTPException(status_code=400, detail="No finding data provided.")
 
     try:
-        result = evidence_graph_builder.build_from_finding(finding)
+        result = evidence_graph_builder.build_from_finding(finding, rbac_filter=rbac_filter)
         return {"status": "success", **result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Evidence graph generation failed: {str(e)}")
