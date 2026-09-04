@@ -22,6 +22,7 @@ TriNetra is built around that principle. It is **not** a crime dashboard, not a 
 - [The investigation pipeline](#the-investigation-pipeline)
 - [Deterministic intent routing](#deterministic-intent-routing)
 - [Entity-first investigation & context](#entity-first-investigation--context)
+- [Persistent chat history (Catalyst Data Store)](#persistent-chat-history-catalyst-data-store)
 - [The scope firewall — no silent broadening](#the-scope-firewall--no-silent-broadening)
 - [Jurisdiction-aware intelligence (RBAC)](#jurisdiction-aware-intelligence-rbac)
 - [NL2SQL with security guardrails](#nl2sql-with-security-guardrails)
@@ -44,7 +45,7 @@ TriNetra is built around that principle. It is **not** a crime dashboard, not a 
 - [Testing & verification](#testing--verification)
 - [Getting started](#getting-started)
 - [Known limitations](#known-limitations)
-- [Catalyst integration — planned](#catalyst-integration--planned)
+- [Catalyst integration](#catalyst-integration)
 - [Future roadmap](#future-roadmap)
 
 ---
@@ -252,6 +253,19 @@ Multi-turn context (session store, isolated per employee) retains the discovered
 > "Show details of FIR X" → "Who is connected to it?" → "Show their transaction trail." → "Now show recent burglary cases in Mysuru."
 
 Turns 2–3 inherit the resolved entities deterministically (a follow-up reference such as *"their"* is merged from context without relying on an LLM rewrite). Turn 4 is detected as a **new scope** and deliberately *replaces* the old context so the earlier FIR can never leak into the Mysuru query. Context is namespaced per employee, so two users can never inherit each other's sessions — even when they share the same default session token.
+
+---
+
+## Persistent chat history (Catalyst Data Store)
+
+Conversations are **persistent**, not ephemeral: an investigator can close the browser, log in later, reopen a conversation and continue exactly where they left off — including the investigation context that anchors follow-up questions such as "who is connected to *it*?" and "show *their* transaction trail".
+
+- **Storage split.** Neon PostgreSQL remains the source of truth for all investigation records (FIRs, accused, financial, network, analytics, alerts). Catalyst Data Store stores only chat artifacts in three tables: `chat_conversations`, `chat_messages` and `investigation_context`.
+- **What is persisted.** Every user message and the **exact final assistant answer** returned to the frontend (deterministic exact-case facts are stored verbatim — history is a record of what was returned, never regenerated). Each message carries the resolved canonical intent and the engine(s) used (`case_query,criminal_network,financial_analysis` style). Structured investigation context (case/accused/transaction ids as JSON, resolved scope, last intent/engines) is upserted per conversation.
+- **Ownership.** `chat_conversations` deliberately has no `employee_id` column in the existing schema; ownership is carried by `chat_messages.employee_id`, written only from the authenticated JWT identity. Every read/write/delete is filtered server-side by that employee id, so knowing another user's `conversation_id` yields a neutral 404. An empty conversation contains no data; its first message (written with the authenticated identity) establishes ownership.
+- **No RBAC bypass.** Restored context is treated as *previous application state*, never as evidence: engines still enforce the caller's own jurisdiction filter, and a persisted entity that is no longer accessible simply resolves to nothing.
+- **Failure isolation.** If the persistence tier is unavailable, `POST /api/chat` without a conversation id keeps working statelessly, and a persistence failure mid-turn is logged while the investigation answer is still returned. Conversation-scoped requests that cannot prove ownership return an honest `503` instead of running unowned.
+- **Backend selection.** `CHAT_STORE_BACKEND=auto` uses the Catalyst store when configured and an in-memory fallback (logged, non-persistent) otherwise; `catalyst` and `memory` force either backend. API: `GET/POST /api/chat/conversations`, `GET/DELETE /api/chat/conversations/{id}`, plus optional `conversation_id` on `/api/chat` and `/api/investigate`. The frontend sidebar lists, reopens and deletes the employee's conversations.
 
 ---
 
@@ -526,11 +540,12 @@ See [How the system works](#how-the-system-works) for the full diagram. In one s
 | Vectors | pgvector (`CaseNarrativeEmbedding`, 768-dim embeddings) |
 | LLM | Groq `openai/gpt-oss-120b` (routing, synthesis, NL2SQL), Google Gemini `gemini-embedding-001` (embeddings) |
 | Speech/translation | Sarvam AI `saaras:v3`, `sarvam-translate:v1` |
+| Chat history | Zoho Catalyst Data Store (`zcatalyst-sdk` Python) — conversations/messages/context |
 | Auth | JWT (HS256), rank-derived RBAC |
 | Graphs | NetworkX (backend), React Flow (frontend) |
 | Other | numpy, pandas, python-multipart, requests |
 
-Environment variables: backend `.env` — `NEON_DATABASE_URL`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `SARVAM_API_KEY`, `JWT_SECRET`; client `.env` — `VITE_GOOGLE_MAPS_API_KEY` (optional). See `.env.example` in the client; backend `.env` is git-ignored.
+Environment variables: backend `.env` (template in `trinetra-backend/.env.example`) — `NEON_DATABASE_URL`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `SARVAM_API_KEY`, `JWT_SECRET`, `CHAT_STORE_BACKEND`, and (for Catalyst-backed chat persistence outside AppSail) `CATALYST_AUTH` + `CATALYST_OPTIONS`; client `.env` — `VITE_GOOGLE_MAPS_API_KEY` (optional). Real `.env` files are git-ignored.
 
 ---
 
@@ -548,11 +563,13 @@ Environment variables: backend `.env` — `NEON_DATABASE_URL`, `GROQ_API_KEY`, `
 
 Current verified state (run on this branch, live Neon DB):
 
-- **Backend:** `179 passed, 2 skipped` across the full `Testing/` suite (`python -m pytest Testing/…`).
+- **Backend:** `185 passed, 2 skipped, 9 environment-limited` across the full `Testing/` suite (`python -m pytest Testing/…`).
 - **Frontend:** `tsc -b` — **0 errors**; Vite production build — **successful**.
 - **Compile:** `py_compile` over `app.py` + all engines — clean.
 
-The suite covers jurisdiction isolation (RAG, narrative similarity, patterns, exact case, network, financial, risk and evidence-graph probes with cross-district assertions), endpoint security (no/invalid token → 401; role-scope checks), intent routing (65 routing tests), exact-case correctness, NL2SQL guardrails (refusal paths), session isolation, financial/network masking, prevention alerts, and a runtime-verified NL2SQL accuracy benchmark against DB ground truth.
+The suite covers jurisdiction isolation (RAG, narrative similarity, patterns, exact case, network, financial, risk and evidence-graph probes with cross-district assertions), endpoint security (no/invalid token → 401; role-scope checks), intent routing (65 routing tests), exact-case correctness, NL2SQL guardrails (refusal paths), session isolation, financial/network masking, prevention alerts, persistent chat conversations (lifecycle, cross-user isolation, context restoration after reload, new-scope replacement, Catalyst-failure survival), and a runtime-verified NL2SQL accuracy benchmark against DB ground truth.
+
+The **9 environment-limited failures** are Groq daily token-quota rejections (HTTP 429 `rate_limit_exceeded`) hit while the LLM-dependent HTTP guardrail benchmark ran after the rest of the suite had consumed the day's budget — same code path passes when quota is available; they are not code failures. Rerun `python -m pytest Testing/test_security_guardrails.py -q` once the quota resets.
 
 The **two skips** are environment guards, reported honestly:
 
@@ -575,11 +592,14 @@ The **two skips** are environment guards, reported honestly:
 cd trinetra-backend
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 python -m pip install -r requirements.txt              # pins may need resolving on your Python version
-# Create a .env file (git-ignored) with:
-#   NEON_DATABASE_URL=<your postgres url>
-#   GROQ_API_KEY=<key> GEMINI_API_KEY=<key>
-#   SARVAM_API_KEY=<optional> JWT_SECRET=<strong secret>
+# Create a .env file from the template (git-ignored):
+cp .env.example .env        # then fill in NEON_DATABASE_URL, GROQ_API_KEY, JWT_SECRET, ...
 uvicorn app:app --host 0.0.0.0 --port 9000
+
+# Optional — persistent chat history via Catalyst Data Store (outside AppSail):
+#   export CHAT_STORE_BACKEND=catalyst
+#   export CATALYST_OPTIONS='{"project_id": ..., "project_key": ..., "project_domain": ...}'
+#   export CATALYST_AUTH='{"refresh_token": ...}'   # service-account credential JSON
 ```
 
 (The live demo database is seeded; schema/seed scripts and CSV dumps are documented under `Catalyst_Schema_CSVs/` and the repository's documentation folders.)
@@ -616,18 +636,20 @@ npm run build
 - **Network expansion** from an authorized anchor may legitimately traverse cross-district relationships where the graph supports them (by design — reachability, not open search).
 - **LLM-synthesized prose** for analytical responses depends on the configured LLM; deterministic record facts (exact case, counts, scope) are protected from LLM overwrite.
 - **JWT dev fallback** — sign tokens with an explicit strong `JWT_SECRET` outside development.
-- **Catalyst is planned, not deployed** (see below).
+- **Catalyst Data Store is used for chat persistence only.** Without `CATALYST_AUTH`/`CATALYST_OPTIONS` (or an AppSail runtime) the chat store falls back to a logged, in-memory backend — the UI works but history does not survive a restart. All other Catalyst services remain planned (see below).
 - The demo database is **synthetic**; no production police data is present.
 
 ---
 
-## Catalyst integration — planned
+## Catalyst integration
 
-Catalyst is **currently planned / not deployed**. The repository contains no Catalyst SDK usage, no AppSail/serverless configuration, no Catalyst service config, and no Catalyst production claim. The only in-code reference is a design comment in `engines/database.py` noting that the offline CSV-backed hybrid data engine will be replaced by `catalyst_app.zcql().execute_query()` in production. The **current data tier is Neon PostgreSQL**.
+Catalyst is **partially integrated, exactly as follows — no more**:
 
-**Currently implemented:** the full TriNetra stack above, running against Neon PostgreSQL.
+**Implemented today:** persistent chat history on **Catalyst Data Store** using the official `zcatalyst-sdk` Python SDK (`engines/catalyst_chat_store.py`). Three manually-created tables store conversations (`chat_conversations`), messages (`chat_messages`) and per-conversation investigation context (`investigation_context`). The SDK is initialized lazily from `CATALYST_AUTH` + `CATALYST_OPTIONS` for non-AppSail runs, or from the request context when deployed on Catalyst AppSail. Ownership is enforced server-side through `chat_messages.employee_id` (see [Persistent chat history](#persistent-chat-history-catalyst-data-store)). **Neon PostgreSQL remains the investigation database of record** — no investigation records are stored in Catalyst.
 
-**Planned / future (not currently deployed):** hosting and managed-service integration on Zoho Catalyst — AppSail for serverless compute, Catalyst Data Store / query (`zcql`) for the database layer, Catalyst Functions for event-driven pipelines, Catalyst authentication/identity where appropriate, Catalyst Cloud Scale/caching, and Catalyst AI/analytics services. These are integration targets, not live services.
+**Not implemented / not deployed:** there is no AppSail hosting configuration in this repository, no Catalyst-based authentication, no Catalyst-hosted UI, and no Catalyst-backed investigation database or analytics. The offline CSV-backed `HybridDataEngine` design comment in `engines/database.py` is unchanged and is not in use.
+
+**Planned / future:** AppSail for compute hosting, Catalyst Functions for event-driven pipelines, Catalyst authentication/identity where appropriate, Catalyst Cloud Scale/caching, and Catalyst AI/analytics services — integration targets, not live services.
 
 ---
 
@@ -635,7 +657,7 @@ Catalyst is **currently planned / not deployed**. The repository contains no Cat
 
 Clearly separated from today's implementation:
 
-- **Catalyst hosting & managed services (planned):** AppSail deployment, Catalyst Data Store + `zcql` query layer, Functions, Cloud Scale, auth/identity and AI/analytics services — per the repo's architecture notes and diagrams, all currently labelled **PLANNED**.
+- **Catalyst hosting & managed services (planned):** AppSail deployment of the backend (the chat-persistence layer already supports the AppSail credential context), Catalyst Functions, Cloud Scale, auth/identity and AI/analytics services — all still labelled **PLANNED**. Catalyst Data Store is already live for chat persistence; moving investigation data to Catalyst is intentionally not planned (Neon stays the record of truth).
 - **Richer narrative corpus & retrieval evaluation:** run the RAGAS harness over a larger seeded narrative set to report grounded quality metrics.
 - **Deployment hardening:** proper `JWT_SECRET` management, a provisioned read-only DB role for guardrail tests, TLS and deployment pipeline.
 - **Investigation breadth:** deeper per-sub-head analytics, more network layers, and integration pilots with real (non-synthetic) police data under strict governance.
