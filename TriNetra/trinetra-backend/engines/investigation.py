@@ -28,6 +28,7 @@ from typing import Optional
 from engines.location_resolver import LocationResolver
 from engines.exact_case import ExactCaseResolver
 from engines.intent_classifier import DeterministicIntentClassifier
+from engines.security import parse_rbac_scope as _parse_rbac_scope
 
 
 # ════════════════════════════════════════════════════════════════
@@ -991,7 +992,7 @@ class InvestigationOrchestrator:
 
         # Phase 2: Narrative RAG (independent)
         if "narrative_rag" in engines_to_run:
-            items = self._run_narrative_rag(filters, rag_engine)
+            items = self._run_narrative_rag(filters, rag_engine, rbac_filter)
             evidence_items.extend(items)
 
         # Phase 3: Pattern detection (independent)
@@ -1007,7 +1008,7 @@ class InvestigationOrchestrator:
         # Phase 5: Case similarity (depends on discovered_cases or explicit case_ids)
         if "case_similarity" in engines_to_run:
             similarity_targets = list(discovered_cases)[:5]  # Cap at 5 for performance
-            items = self._run_case_similarity(similarity_targets, pattern_engine)
+            items = self._run_case_similarity(similarity_targets, pattern_engine, rbac_filter)
             evidence_items.extend(items)
 
         # Phase 6: Network analysis (depends on discovered_accused)
@@ -1017,10 +1018,22 @@ class InvestigationOrchestrator:
                 discovered_accused = self._extract_accused_from_cases(
                     discovered_cases, rbac_filter
                 )
-            items = self._run_network_analysis(
-                list(discovered_accused)[:10], network_engine
+            # Entry guard: an accused anchor must belong to the caller's
+            # jurisdiction (same rule as the /api/network REST endpoint).
+            # Cross-jurisdiction expansion is only allowed FROM an authorized
+            # anchor — never as an unrestricted starting search.
+            authorized = self._authorized_accused(
+                list(discovered_accused)[:10], rbac_filter, network_engine
             )
-            evidence_items.extend(items)
+            if authorized == []:
+                evidence_items.append(self._build_not_in_scope_item(
+                    "criminal_network",
+                    "No accused in the requested analysis is inside your authorized jurisdiction.",
+                ))
+            else:
+                anchors = authorized if authorized is not None else list(discovered_accused)[:10]
+                items = self._run_network_analysis(anchors, network_engine)
+                evidence_items.extend(items)
 
         # Phase 7: Risk profiles (depends on discovered_accused)
         if "risk_profile" in engines_to_run:
@@ -1028,10 +1041,18 @@ class InvestigationOrchestrator:
                 discovered_accused = self._extract_accused_from_cases(
                     discovered_cases, rbac_filter
                 )
-            items = self._run_risk_profiles(
-                list(discovered_accused)[:20], analytics_engine
+            authorized = self._authorized_accused(
+                list(discovered_accused)[:20], rbac_filter, network_engine
             )
-            evidence_items.extend(items)
+            if authorized == []:
+                evidence_items.append(self._build_not_in_scope_item(
+                    "risk_profile",
+                    "No accused in the requested analysis is inside your authorized jurisdiction.",
+                ))
+            else:
+                anchors = authorized if authorized is not None else list(discovered_accused)[:20]
+                items = self._run_risk_profiles(anchors, analytics_engine)
+                evidence_items.extend(items)
 
         # Phase 8: Financial intelligence (depends on discovered_accused + discovered_cases)
         if "financial_intelligence" in engines_to_run or "financial" in engines_to_run:
@@ -1039,12 +1060,24 @@ class InvestigationOrchestrator:
                 discovered_accused = self._extract_accused_from_cases(
                     discovered_cases, rbac_filter
                 )
-            items = self._run_financial_analysis(
-                list(discovered_accused)[:20],
-                list(discovered_cases)[:10],
-                filters,
+            unit_bound, district_bound = _parse_rbac_scope(rbac_filter)
+            authorized = self._authorized_accused(
+                list(discovered_accused)[:20], rbac_filter, network_engine
             )
-            evidence_items.extend(items)
+            if authorized is not None and not authorized:
+                evidence_items.append(self._build_not_in_scope_item(
+                    "financial_intelligence",
+                    "No accused in the requested analysis is inside your authorized jurisdiction.",
+                ))
+            else:
+                items = self._run_financial_analysis(
+                    authorized if authorized is not None else list(discovered_accused)[:20],
+                    list(discovered_cases)[:10],
+                    filters,
+                    jurisdiction_unit_id=unit_bound,
+                    jurisdiction_district_id=district_bound,
+                )
+                evidence_items.extend(items)
 
         # Record which engines actually ran and succeeded for the scope UI
         # (context_required / zero_result / errors are NOT "executed" findings)
@@ -1108,6 +1141,47 @@ class InvestigationOrchestrator:
             "engine": "case_query",
             "type": "context_required",
             "data": {"intent": intent, "error": message},
+            "signal": message,
+            "strength": "none",
+        }
+
+    def _authorized_accused(self, accused_ids: list, rbac_filter: str,
+                            network_engine) -> list:
+        """Filters accused anchors down to the caller's jurisdiction.
+
+        State-wide access (rbac_filter == 1=1 / None) or an unavailable
+        network engine returns None (no enforcement needed). For restricted
+        roles every anchor must be linked to a case inside the caller's
+        station/district; out-of-scope anchors are dropped so a network, risk
+        or financial analysis can never start from another jurisdiction's
+        person. An empty list means "enforced and nothing is in scope".
+        """
+        if not accused_ids:
+            return []
+        if network_engine is None:
+            return None
+        unit_id, district_id = _parse_rbac_scope(rbac_filter)
+        if unit_id is None and district_id is None:
+            return None
+        try:
+            allowed = [
+                aid for aid in accused_ids
+                if network_engine.accused_in_scope(
+                    aid, unit_id=unit_id, district_id=district_id
+                )
+            ]
+        except Exception:
+            # Enforcement failed — refuse rather than widen (fail closed).
+            return []
+        return allowed
+
+    def _build_not_in_scope_item(self, engine: str, message: str) -> dict:
+        """Evidence item stating an analysis was stopped because every anchor
+        entity sits outside the caller's authorized jurisdiction."""
+        return {
+            "engine": engine,
+            "type": "scope_error",
+            "data": {"error": message},
             "signal": message,
             "strength": "none",
         }
@@ -1185,7 +1259,8 @@ class InvestigationOrchestrator:
                     if district_name:
                         query_text += f" in {district_name}"
                     generated_sql = nl2sql_engine.generate_sql(query_text, rbac_filter=rbac_filter)
-                    exec_result = nl2sql_engine.validate_and_execute(generated_sql, query_text)
+                    exec_result = nl2sql_engine.validate_and_execute(
+                        generated_sql, query_text, rbac_filter=rbac_filter)
                     if "error" not in exec_result and exec_result.get("rows"):
                         items.append({
                             "engine": "case_query",
@@ -1205,8 +1280,14 @@ class InvestigationOrchestrator:
             })
         return items
 
-    def _run_narrative_rag(self, filters: dict, rag_engine) -> list:
-        """Execute RAG semantic search. Returns evidence items."""
+    def _run_narrative_rag(self, filters: dict, rag_engine, rbac_filter: str = "1=1") -> list:
+        """Execute RAG semantic search. Returns evidence items.
+
+        The search corpus is jurisdiction-scoped BEFORE the similarity ranking
+        (rbac_filter is mandatory; an explicit district named by the
+        investigator narrows further). A restricted role can therefore never
+        retrieve or cite a narrative that sits outside its own jurisdiction.
+        """
         items = []
         try:
             # Prefer the explicitly extracted MO/narrative phrase
@@ -1215,7 +1296,17 @@ class InvestigationOrchestrator:
             if not keyword:
                 return items
 
-            result = rag_engine.search_and_summarize(keyword)
+            # The district named in the query narrows the corpus; the RBAC
+            # condition keeps every candidate inside the caller's jurisdiction.
+            district_id = filters.get("district_id")
+            if (rbac_filter or "").strip() not in ("", "1=1"):
+                # A restricted role may never widen into a district it does not
+                # hold, so only pass an explicit district when the caller is
+                # state-wide (the rbac condition itself keeps the query scoped).
+                district_id = None
+            result = rag_engine.search_and_summarize(
+                keyword, rbac_filter=rbac_filter or "1=1", district_id=district_id
+            )
             if "error" not in result and result.get("citations"):
                 items.append({
                     "engine": "narrative_rag",
@@ -1282,10 +1373,13 @@ class InvestigationOrchestrator:
                     crime_head_id=scoped_crime_id,
                     district_id=district_id,
                     time_window=time_window,
+                    rbac_filter=rbac_filter,
                 )
             else:
                 # No specific scope requested — use general emerging patterns
-                result = pattern_engine.get_emerging_patterns()
+                # RBAC is always applied so a restricted role can never receive
+                # patterns (or supporting FIRs) from outside its jurisdiction.
+                result = pattern_engine.get_emerging_patterns(rbac_filter=rbac_filter)
 
             if "error" in result:
                 # Engine failed — a distinct outcome from "no pattern found".
@@ -1430,7 +1524,8 @@ class InvestigationOrchestrator:
                 generated_sql = nl2sql_engine.generate_sql(
                     query_text + trend_instruction, rbac_filter=rbac_filter
                 )
-                exec_result = nl2sql_engine.validate_and_execute(generated_sql, query_text)
+                exec_result = nl2sql_engine.validate_and_execute(
+                        generated_sql, query_text, rbac_filter=rbac_filter)
                 if "error" not in exec_result and exec_result.get("rows"):
                     rows = []
                     for row in exec_result["rows"]:
@@ -1524,13 +1619,32 @@ class InvestigationOrchestrator:
         except Exception:
             return []
 
-    def _run_case_similarity(self, case_ids: list, pattern_engine) -> list:
-        """Run case similarity for each target case. Returns evidence items."""
+    def _run_case_similarity(self, case_ids: list, pattern_engine,
+                             rbac_filter: str = "1=1") -> list:
+        """Run case similarity for each target case. Returns evidence items.
+
+        The similarity search itself is jurisdiction-scoped: the anchor must
+        resolve inside the caller's scope and every candidate record returned
+        must also sit inside it (see PatternEngine.find_similar_cases), so
+        similarity can never expose records the caller may not read.
+        """
         items = []
         for case_id in case_ids[:5]:
             try:
-                result = pattern_engine.find_similar_cases(case_id=case_id, k=5)
-                if "error" not in result and result.get("similar_cases"):
+                result = pattern_engine.find_similar_cases(
+                    case_id=case_id, k=5, rbac_filter=rbac_filter
+                )
+                if result.get("anchor_in_scope") is False:
+                    # Anchor not resolvable inside the caller's jurisdiction:
+                    # same response as an unknown case — no analysis runs.
+                    items.append({
+                        "engine": "case_similarity",
+                        "type": "scope_error",
+                        "data": {"error": f"Case #{case_id} not found in authorized records."},
+                        "signal": f"Similarity analysis stopped: case #{case_id} is not in the authorized records.",
+                        "strength": "none",
+                    })
+                elif "error" not in result and result.get("similar_cases"):
                     matches = result["similar_cases"]
                     items.append({
                         "engine": "case_similarity",
@@ -1632,8 +1746,16 @@ class InvestigationOrchestrator:
             })
         return items
 
-    def _run_financial_analysis(self, accused_ids: list, case_ids: list, filters: dict) -> list:
-        """Execute financial intelligence analysis for investigation entities."""
+    def _run_financial_analysis(self, accused_ids: list, case_ids: list, filters: dict,
+                                jurisdiction_unit_id: int = None,
+                                jurisdiction_district_id: int = None) -> list:
+        """Execute financial intelligence analysis for investigation entities.
+
+        Jurisdiction bounds (Investigator -> station / Supervisor -> district)
+        are passed into the engine, which applies them as an EXISTS condition on
+        every account query, so restricted roles can never receive accounts or
+        transactions belonging to another jurisdiction's accused.
+        """
         items = []
         if not accused_ids and not case_ids:
             return items
@@ -1650,6 +1772,8 @@ class InvestigationOrchestrator:
                 case_ids=case_ids if case_ids else None,
                 date_from=date_from,
                 date_to=date_to,
+                jurisdiction_unit_id=jurisdiction_unit_id,
+                jurisdiction_district_id=jurisdiction_district_id,
             )
 
             # Generate financial leads

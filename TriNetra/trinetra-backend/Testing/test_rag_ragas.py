@@ -19,7 +19,13 @@ Run:
     python test_rag_ragas.py
 """
 import requests
-from datasets import Dataset
+import pytest
+
+# Optional RAG quality harness: requires `pip install ragas datasets` plus a
+# judge-LLM API key (see the module docstring). Skipped, not failed, when the
+# dependency is absent so the rest of the suite is unaffected.
+datasets = pytest.importorskip("datasets")
+Dataset = datasets.Dataset
 
 API_BASE = "http://localhost:9000"
 CHAT_ENDPOINT = f"{API_BASE}/api/chat"

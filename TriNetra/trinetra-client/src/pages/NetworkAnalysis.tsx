@@ -1,8 +1,8 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
-  Search, Network, Loader2, AlertCircle, X, Users, Shield, FileText,
-  MapPin, Calendar, ChevronRight, Crosshair, Eye, CreditCard,
-  Target, UserX, User, Scale, Fingerprint, BarChart3, ExternalLink
+  Search, Network, Loader2, AlertCircle, X, Users, FileText,
+  MapPin, ChevronRight, Crosshair, Eye, CreditCard,
+  Target, UserX, Scale, Fingerprint, BarChart3
 } from 'lucide-react';
 import {
   searchNetworkAPI,
@@ -11,8 +11,6 @@ import {
   type NetworkSearchResult,
   type NetworkGraphResponse,
   type NodeDetailResponse,
-  type NetworkNode,
-  type NetworkEdge,
 } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 

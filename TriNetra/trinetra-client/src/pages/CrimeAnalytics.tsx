@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
-import { MapPin, TrendingUp, AlertTriangle, Calendar, Shield, RefreshCw, BarChart2, Clock, Users, DollarSign, Activity } from 'lucide-react';
+import { MapPin, TrendingUp, AlertTriangle, Calendar, Shield, RefreshCw, BarChart2, Clock, Users, Activity } from 'lucide-react';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, 
   BarChart, Bar, Legend, PieChart, Pie, Cell, LineChart, Line

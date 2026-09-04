@@ -38,10 +38,18 @@ class EvidenceGraphBuilder:
     def __init__(self):
         self.db_url = os.getenv("NEON_DATABASE_URL")
 
-    def build_from_finding(self, finding: dict) -> dict:
+    def build_from_finding(self, finding: dict, rbac_filter: str = "1=1") -> dict:
         """
         Main entry point. Routes to the appropriate builder based
         on finding category.
+
+        Args:
+            finding: an investigation finding dict (category + data).
+            rbac_filter: server-generated row-level security condition. When
+                the caller is jurisdiction-bound, every DB-backed label lookup
+                (case CrimeNo / accused name) is restricted to records inside
+                that jurisdiction — a crafted finding can never be used to
+                enumerate identifiers or names from another district.
 
         Returns:
             {
@@ -56,13 +64,13 @@ class EvidenceGraphBuilder:
         data = finding.get("data", {})
 
         if "Similarity" in category:
-            return self._build_similarity_graph(data, finding)
+            return self._build_similarity_graph(data, finding, rbac_filter)
         elif "Pattern" in category:
             return self._build_pattern_graph(data, finding)
         elif "Network" in category:
             return self._build_network_graph(data, finding)
         elif "Risk" in category:
-            return self._build_risk_graph(data, finding)
+            return self._build_risk_graph(data, finding, rbac_filter)
         elif "Cases Identified" in category:
             return self._build_case_list_graph(data, finding)
         else:
@@ -72,7 +80,7 @@ class EvidenceGraphBuilder:
     #  CASE SIMILARITY EVIDENCE GRAPH
     # ──────────────────────────────────────────────────────────
 
-    def _build_similarity_graph(self, data: dict, finding: dict) -> dict:
+    def _build_similarity_graph(self, data: dict, finding: dict, rbac_filter: str = "1=1") -> dict:
         """
         Builds evidence graph for case similarity findings.
 
@@ -94,7 +102,7 @@ class EvidenceGraphBuilder:
         for target_id, matches in target_cases.items():
             # Add target case node
             target_node_id = f"case_{target_id}"
-            target_label = self._get_case_label(target_id)
+            target_label = self._get_case_label(target_id, rbac_filter)
             nodes.append({
                 "id": target_node_id,
                 "type": "case",
@@ -110,7 +118,7 @@ class EvidenceGraphBuilder:
 
                 # Add matched case node
                 match_node_id = f"case_{match_case_id}"
-                match_label = self._get_case_label(match_case_id)
+                match_label = self._get_case_label(match_case_id, rbac_filter)
                 nodes.append({
                     "id": match_node_id,
                     "type": "case",
@@ -406,7 +414,7 @@ class EvidenceGraphBuilder:
     #  RISK PROFILE EVIDENCE GRAPH
     # ──────────────────────────────────────────────────────────
 
-    def _build_risk_graph(self, data: dict, finding: dict) -> dict:
+    def _build_risk_graph(self, data: dict, finding: dict, rbac_filter: str = "1=1") -> dict:
         """
         Builds evidence graph for risk profile findings.
 
@@ -423,7 +431,7 @@ class EvidenceGraphBuilder:
 
             # Person node
             person_node_id = f"person_{accused_id}"
-            person_label = self._get_accused_label(accused_id)
+            person_label = self._get_accused_label(accused_id, rbac_filter)
             nodes.append({
                 "id": person_node_id,
                 "type": "person",
@@ -570,14 +578,28 @@ class EvidenceGraphBuilder:
     #  HELPERS
     # ──────────────────────────────────────────────────────────
 
-    def _get_case_label(self, case_id: int) -> str:
-        """Fetches CrimeNo for a case from the database."""
+    def _get_case_label(self, case_id: int, rbac_filter: str = "1=1") -> str:
+        """Fetches CrimeNo for a case, restricted to the caller's jurisdiction.
+
+        Out-of-scope (or unknown) cases return the same neutral placeholder as
+        a missing record so an ID probe reveals nothing."""
         if not self.db_url:
             return f"Case #{case_id}"
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
-            cur.execute("SELECT CrimeNo FROM CaseMaster WHERE CaseMasterID = %s", (case_id,))
+            if (rbac_filter or "").strip() and rbac_filter.strip() != "1=1":
+                cur.execute(
+                    "SELECT cm.CrimeNo FROM CaseMaster cm "
+                    "JOIN Unit u ON cm.PoliceStationID = u.UnitID "
+                    "WHERE cm.CaseMasterID = %s AND (" + rbac_filter + ")",
+                    (case_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT CrimeNo FROM CaseMaster WHERE CaseMasterID = %s",
+                    (case_id,),
+                )
             row = cur.fetchone()
             cur.close()
             conn.close()
@@ -585,14 +607,28 @@ class EvidenceGraphBuilder:
         except Exception:
             return f"Case #{case_id}"
 
-    def _get_accused_label(self, accused_id: int) -> str:
-        """Fetches AccusedName for an accused from the database."""
+    def _get_accused_label(self, accused_id: int, rbac_filter: str = "1=1") -> str:
+        """Fetches AccusedName for an accused, restricted to the caller's
+        jurisdiction (via the accused's case). Out-of-scope / unknown accused
+        return the same neutral placeholder as a missing record."""
         if not self.db_url:
             return f"Accused #{accused_id}"
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
-            cur.execute("SELECT AccusedName FROM Accused WHERE AccusedMasterID = %s", (accused_id,))
+            if (rbac_filter or "").strip() and rbac_filter.strip() != "1=1":
+                cur.execute(
+                    "SELECT a.AccusedName FROM Accused a "
+                    "JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID "
+                    "JOIN Unit u ON cm.PoliceStationID = u.UnitID "
+                    "WHERE a.AccusedMasterID = %s AND (" + rbac_filter + ")",
+                    (accused_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT AccusedName FROM Accused WHERE AccusedMasterID = %s",
+                    (accused_id,),
+                )
             row = cur.fetchone()
             cur.close()
             conn.close()

@@ -1,24 +1,21 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Search, Loader2, AlertCircle, X, Users, CreditCard,
-  Calendar, ChevronRight, ChevronDown, ChevronUp,
+  Calendar,  ChevronRight, ChevronDown,
   Filter, ArrowRight, DollarSign, Link2, AlertTriangle, TrendingUp,
   Activity, RefreshCw, Layers, Banknote,
-  GitBranch, Zap, Shield, Target, Workflow, Network,
+  Zap, Target, Workflow, Network,
   User, CircleDollarSign, FileText, AlertOctagon, Share2,
-  ArrowUpRight, Eye,
+  ArrowUpRight,
 } from 'lucide-react';
 import ReactFlow, { Background, Controls, MarkerType } from 'reactflow';
-import type { Node, Edge, NodeMouseHandler } from 'reactflow';
+import type { Edge, NodeMouseHandler } from 'reactflow';
 import 'reactflow/dist/style.css';
 import {
   fetchFinancialAnalysis,
   type FinancialAnalysisResponse,
   type FinancialAccount,
   type FinancialTransaction,
-  type FinancialCrossCaseLink,
-  type FinancialAnomaly,
-  type FinancialLead,
   type FinancialGraph,
 } from '../services/api';
 import { cn } from '../lib/utils';
@@ -87,7 +84,7 @@ function formatDate(d: string | null): string {
 
 function useFinancialGraphNodes(
   graph: FinancialGraph | null, selectedId: string | null,
-  onSelect: (id: string, type: string) => void, compact = false,
+  compact = false,
 ) {
   return useMemo(() => {
     if (!graph || !graph.nodes.length) return [];
@@ -205,7 +202,7 @@ export default function FinancialTrailPage() {
 
   // Scroll-spy
   const [activeSection, setActiveSection] = useState('overview');
-  const sectionRefs: Record<string, React.RefObject<HTMLDivElement>> = {
+  const sectionRefs: Record<string, React.RefObject<HTMLDivElement | null>> = {
     overview: useRef<HTMLDivElement>(null),
     relationships: useRef<HTMLDivElement>(null),
     moneyflow: useRef<HTMLDivElement>(null),
@@ -254,9 +251,9 @@ export default function FinancialTrailPage() {
 
   // Graph data
   const focusedGraphData = useFocusedGraphData(data!);
-  const fullGraphNodes = useFinancialGraphNodes(data?.graph || null, selectedNodeId, (id) => { setSelectedNodeId(id); setSelectedEdgeId(null); setDetailOpen(true); });
+  const fullGraphNodes = useFinancialGraphNodes(data?.graph || null, selectedNodeId);
   const fullGraphEdges = useFinancialGraphEdges(data?.graph || null, selectedEdgeId);
-  const focusedNodes = useFinancialGraphNodes(focusedGraphData.nodes.length > 0 ? { nodes: focusedGraphData.nodes, edges: focusedGraphData.edges } : null, selectedNodeId, (id) => { setSelectedNodeId(id); setSelectedEdgeId(null); setDetailOpen(true); }, true);
+  const focusedNodes = useFinancialGraphNodes(focusedGraphData.nodes.length > 0 ? { nodes: focusedGraphData.nodes, edges: focusedGraphData.edges } : null, selectedNodeId, true);
   const focusedEdges = useFinancialGraphEdges(focusedGraphData.nodes.length > 0 ? { nodes: focusedGraphData.nodes, edges: focusedGraphData.edges } : null, selectedEdgeId);
   const activeGraphNodes = showFullNetwork ? fullGraphNodes : focusedNodes;
   const activeGraphEdges = showFullNetwork ? fullGraphEdges : focusedEdges;
@@ -657,10 +654,10 @@ export default function FinancialTrailPage() {
 
             {/* Summary grid */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-              <EvidenceStat icon={<Users className="w-4 h-4" />} label="Accounts" value={data.summary.total_accounts} color="emerald" />
-              <EvidenceStat icon={<Activity className="w-4 h-4" />} label="Transactions" value={data.summary.total_transactions} sub={data.summary.flagged_transactions > 0 ? `${data.summary.flagged_transactions} flagged` : undefined} color="blue" />
-              <EvidenceStat icon={<DollarSign className="w-4 h-4" />} label="Total Value" value={formatCurrency(data.summary.total_amount)} color="amber" />
-              <EvidenceStat icon={<TrendingUp className="w-4 h-4" />} label="Persons" value={data.summary.unique_persons} color="slate" />
+              <EvidenceStat icon={<Users className="w-4 h-4" />} label="Accounts" value={data.summary.total_accounts} color="text-emerald-600" bg="bg-emerald-50" />
+              <EvidenceStat icon={<Activity className="w-4 h-4" />} label="Transactions" value={data.summary.total_transactions} sub={data.summary.flagged_transactions > 0 ? `${data.summary.flagged_transactions} flagged` : undefined} color="text-blue-600" bg="bg-blue-50" />
+              <EvidenceStat icon={<DollarSign className="w-4 h-4" />} label="Total Value" value={formatCurrency(data.summary.total_amount)} color="text-amber-600" bg="bg-amber-50" />
+              <EvidenceStat icon={<TrendingUp className="w-4 h-4" />} label="Persons" value={data.summary.unique_persons} color="text-slate-600" bg="bg-slate-50" />
             </div>
 
             {/* Timeline */}

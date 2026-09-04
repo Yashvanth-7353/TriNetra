@@ -1,32 +1,17 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import ArchitecturePage from './ArchitecturePage';
 import {
   Shield, Brain, Network, Map, UserCheck, Bell, Mic, ChevronRight, Lock,
   MessageSquare, Database, FolderSearch, Code, Briefcase, Globe, Server,
-  Search, Eye, TrendingUp, Link2, ArrowRight, Layers, Fingerprint,
-  AlertTriangle, Scale, FileText, CreditCard, Target, Cpu, KeyRound,
-  CheckCircle2, Zap, Users, GitBranch, Activity, DollarSign, Sparkles
+  Search, Eye, Link2, ArrowRight, Layers,
+  AlertTriangle, FileText, CreditCard, Target, Cpu, KeyRound,
+  CheckCircle2, Zap, Users, GitBranch, DollarSign, Sparkles
 } from 'lucide-react';
 
 /* ══════════════════════════════════════════════
    SCROLL REVEAL HOOK
    ══════════════════════════════════════════════ */
-function useScrollReveal() {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) { el.classList.add('visible'); observer.unobserve(el); } },
-      { threshold: 0.15, rootMargin: '0px 0px -60px 0px' }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-  return ref;
-}
-
 function RevealDiv({ children, className = '', variant = 'up', delay = 0, ...props }: {
   children: ReactNode; className?: string; variant?: 'up' | 'left' | 'right' | 'scale'; delay?: number;
 } & React.HTMLAttributes<HTMLDivElement>) {

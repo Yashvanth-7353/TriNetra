@@ -21,7 +21,9 @@ export default function Dashboard() {
     activeAlertsCount: 0,
   });
   const [trendData, setTrendData] = useState<TrendDataPoint[]>([]);
-  const [latestAlerts, setLatestAlerts] = useState<any[]>([]);
+  // The alerts panel is temporarily hidden; the value binding is unused but
+  // the setter still feeds it from the API (kept for the hidden UI section).
+  const [, setLatestAlerts] = useState<any[]>([]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

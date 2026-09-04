@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Search, Eye, FileText, Calendar, MapPin, X, Loader2, AlertCircle,
-  ChevronLeft, ChevronRight, Filter, SlidersHorizontal, Users, Clock,
-  Scale, Shield, UserX, User, Crosshair, Building2, Gavel, ArrowUpDown,
+  ChevronLeft, ChevronRight, SlidersHorizontal, Users, Clock,
+  Scale, Shield, UserX, User, Crosshair, Building2, Gavel,
   FolderSearch, XCircle, RefreshCw, ExternalLink, Info
 } from 'lucide-react';
 import {
@@ -14,7 +14,6 @@ import {
   type CaseSearchResult,
   type CaseSearchParams,
   type CaseDetailResponse,
-  type FilterOption,
 } from '../services/api';
 
 // ─── Status Badge Color Map ───
@@ -64,6 +63,11 @@ function SkeletonRow() {
 //  MAIN COMPONENT
 // ═══════════════════════════════════════════════
 export default function CaseExplorer() {
+  // Google Static Maps key — loaded from the environment only, never
+  // hardcoded. When it is unset the mini map degrades to a placeholder note
+  // (the coordinates are still shown) instead of firing a keyless request.
+  const googleMapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
   const [searchParams, setSearchParams] = useSearchParams();
   const urlSearch = searchParams.get('search');
 
@@ -681,12 +685,20 @@ export default function CaseExplorer() {
                         <div>
                           <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Location</h4>
                           <div className="bg-slate-100 rounded-xl overflow-hidden border border-slate-200 relative group">
-                            <img
-                              src={`https://maps.googleapis.com/maps/api/staticmap?center=${caseDetail.case.latitude},${caseDetail.case.longitude}&zoom=14&size=600x200&maptype=roadmap&markers=color:red%7C${caseDetail.case.latitude},${caseDetail.case.longitude}&key=`}
-                              alt="Case location"
-                              className="w-full h-[160px] object-cover opacity-0"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                            />
+                            {googleMapsKey ? (
+                              <img
+                                src={`https://maps.googleapis.com/maps/api/staticmap?center=${caseDetail.case.latitude},${caseDetail.case.longitude}&zoom=14&size=600x200&maptype=roadmap&markers=color:red%7C${caseDetail.case.latitude},${caseDetail.case.longitude}&key=${encodeURIComponent(googleMapsKey)}`}
+                                alt="Case location"
+                                className="w-full h-[160px] object-cover"
+                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                              />
+                            ) : (
+                              <div className="w-full h-[160px] flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 text-center px-4">
+                                <p className="text-xs text-slate-400 leading-relaxed">
+                                  Map preview unavailable — set <code className="text-slate-500 font-mono">VITE_GOOGLE_MAPS_API_KEY</code> in the client&apos;s <code className="text-slate-500 font-mono">.env</code> to enable it.
+                                </p>
+                              </div>
+                            )}
                             <div className="flex items-center gap-3 p-4">
                               <div className="w-10 h-10 bg-primary-100 rounded-lg flex items-center justify-center shrink-0">
                                 <Crosshair className="w-5 h-5 text-primary-600" />
