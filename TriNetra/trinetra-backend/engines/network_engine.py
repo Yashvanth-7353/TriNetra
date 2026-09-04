@@ -259,7 +259,6 @@ class NetworkEngine:
             "key": cache_key,
             "graph": G
         }
-        print(f"[NetworkEngine] Graph built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges for layers {active_layers}")
         return G
 
     # ══════════════════════════════════════════════
@@ -548,13 +547,21 @@ class NetworkEngine:
                 "crime_type": r[6],
             })
 
-        # Financial accounts
+        # Financial accounts — raw account numbers are masked at this API
+        # boundary (XXXX-last4); full numbers are never serialized.
         cur.execute("""
             SELECT sa.AccountNumber, sa.BankName
             FROM SuspectAccount sa
             WHERE sa.AccusedMasterID = %s
         """, (accused_id,))
-        accounts = [{"account": r[0], "bank": r[1]} for r in cur.fetchall()]
+        accounts = []
+        for r in cur.fetchall():
+            raw = r[0]
+            masked = None
+            if raw:
+                s = str(raw)
+                masked = f"XXXX-{s[-4:]}" if len(s) >= 4 else s
+            accounts.append({"account": masked, "bank": r[1]})
 
         # Modus Operandi
         cur.execute("""
