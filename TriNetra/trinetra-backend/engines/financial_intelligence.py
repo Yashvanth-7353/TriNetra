@@ -50,6 +50,8 @@ class FinancialIntelligenceEngine:
         case_ids: list = None,
         date_from: str = None,
         date_to: str = None,
+        jurisdiction_unit_id: int = None,
+        jurisdiction_district_id: int = None,
     ) -> dict:
         """
         Analyze financial relationships starting from investigation entities.
@@ -59,6 +61,11 @@ class FinancialIntelligenceEngine:
             case_ids: CaseMasterIDs to scope to
             date_from: ISO date string for time filter
             date_to: ISO date string for time filter
+            jurisdiction_unit_id: PoliceStationID bound (Investigator scope) —
+                only accused linked to at least one case at this station are
+                considered, so cross-jurisdiction records can never leak.
+            jurisdiction_district_id: DistrictID bound (Supervisor scope).
+                Exactly one of the two may be set; Analyst/Policymaker pass none.
 
         Returns:
             {
@@ -82,7 +89,11 @@ class FinancialIntelligenceEngine:
 
         try:
             # Step 1: Resolve investigation entities to accounts
-            accounts = self._get_accounts_for_entities(cur, accused_ids, case_ids)
+            accounts = self._get_accounts_for_entities(
+                cur, accused_ids, case_ids,
+                jurisdiction_unit_id=jurisdiction_unit_id,
+                jurisdiction_district_id=jurisdiction_district_id,
+            )
 
             if not accounts:
                 return self._empty_result(
@@ -168,9 +179,41 @@ class FinancialIntelligenceEngine:
     # Step 1: Get accounts for investigation entities
     # ─────────────────────────────────────────────────────
 
-    def _get_accounts_for_entities(self, cur, accused_ids, case_ids):
+    def _get_accounts_for_entities(self, cur, accused_ids, case_ids,
+                                   jurisdiction_unit_id=None,
+                                   jurisdiction_district_id=None):
         """Get SuspectAccount records linked to accused or cases.
-        If no filters provided, return all accounts."""
+
+        Jurisdiction: when jurisdiction_unit_id / jurisdiction_district_id is set,
+        only accused with at least one case inside that station/district are
+        considered (parameterized EXISTS). Analyst/Policymaker (neither set)
+        keep the original behaviour.
+
+        NOTE: with no entity scope AND no jurisdiction the engine intentionally
+        returns no rows — an unscoped, unbounded financial dump must never be
+        served. Callers that legitimately need state-wide analysis are Analysts
+        whose endpoint passes jurisdiction=None and explicit ids.
+        """
+        scope_clause = ""
+        scope_params = []
+        if jurisdiction_unit_id:
+            scope_clause = (
+                " AND EXISTS (SELECT 1 FROM Accused sca JOIN CaseMaster scm"
+                " ON sca.CaseMasterID = scm.CaseMasterID"
+                " WHERE sca.AccusedMasterID = a.AccusedMasterID"
+                " AND scm.PoliceStationID = %s)"
+            )
+            scope_params.append(jurisdiction_unit_id)
+        elif jurisdiction_district_id:
+            scope_clause = (
+                " AND EXISTS (SELECT 1 FROM Accused sca JOIN CaseMaster scm"
+                " ON sca.CaseMasterID = scm.CaseMasterID JOIN Unit scu"
+                " ON scm.PoliceStationID = scu.UnitID"
+                " WHERE sca.AccusedMasterID = a.AccusedMasterID"
+                " AND scu.DistrictID = %s)"
+            )
+            scope_params.append(jurisdiction_district_id)
+
         results = []
         seen_ids = set()
 
@@ -182,8 +225,8 @@ class FinancialIntelligenceEngine:
                 FROM SuspectAccount sa
                 JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
                 JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
-                WHERE sa.AccusedMasterID IN ({placeholders})
-            """, accused_ids)
+                WHERE sa.AccusedMasterID IN ({placeholders}){scope_clause}
+            """, accused_ids + scope_params)
             for r in cur.fetchall():
                 acct = self._row_to_account(r)
                 results.append(acct)
@@ -197,34 +240,78 @@ class FinancialIntelligenceEngine:
                 FROM SuspectAccount sa
                 JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
                 JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
-                WHERE a.CaseMasterID IN ({placeholders})
-            """, case_ids)
+                WHERE a.CaseMasterID IN ({placeholders}){scope_clause}
+            """, case_ids + scope_params)
             for r in cur.fetchall():
                 acct = self._row_to_account(r)
                 if acct["account_id"] not in seen_ids:
                     results.append(acct)
                     seen_ids.add(acct["account_id"])
 
-        # If no specific scope, return all accounts
+        # No entity scope: accounts for the caller's whole jurisdiction when a
+        # jurisdiction bound is set (station for Investigator / district for
+        # Supervisor). Without either, ALL suspect accounts are returned — this
+        # path is only reachable for state-wide roles (Analyst/Policymaker); the
+        # REST layer always passes a jurisdiction bound for restricted roles.
         if not accused_ids and not case_ids:
-            cur.execute("""
-                SELECT sa.AccountID, sa.AccusedMasterID, sa.AccountNumber, sa.BankName, sa.IFSC,
-                       a.AccusedName, a.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate
-                FROM SuspectAccount sa
-                JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
-                JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
-                ORDER BY sa.AccountID
-            """)
+            if jurisdiction_unit_id or jurisdiction_district_id:
+                if jurisdiction_district_id:
+                    cur.execute("""
+                        SELECT sa.AccountID, sa.AccusedMasterID, sa.AccountNumber, sa.BankName, sa.IFSC,
+                               a.AccusedName, a.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate
+                        FROM SuspectAccount sa
+                        JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
+                        JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
+                        WHERE EXISTS (
+                            SELECT 1 FROM Accused sca JOIN CaseMaster scm
+                            ON sca.CaseMasterID = scm.CaseMasterID
+                            JOIN Unit scu ON scm.PoliceStationID = scu.UnitID
+                            WHERE sca.AccusedMasterID = a.AccusedMasterID
+                            AND scu.DistrictID = %s
+                        )
+                        ORDER BY sa.AccountID
+                    """, scope_params)
+                else:
+                    cur.execute("""
+                        SELECT sa.AccountID, sa.AccusedMasterID, sa.AccountNumber, sa.BankName, sa.IFSC,
+                               a.AccusedName, a.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate
+                        FROM SuspectAccount sa
+                        JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
+                        JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
+                        WHERE EXISTS (
+                            SELECT 1 FROM Accused sca JOIN CaseMaster scm
+                            ON sca.CaseMasterID = scm.CaseMasterID
+                            WHERE sca.AccusedMasterID = a.AccusedMasterID
+                            AND scm.PoliceStationID = %s
+                        )
+                        ORDER BY sa.AccountID
+                    """, scope_params)
+            else:
+                cur.execute("""
+                    SELECT sa.AccountID, sa.AccusedMasterID, sa.AccountNumber, sa.BankName, sa.IFSC,
+                           a.AccusedName, a.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate
+                    FROM SuspectAccount sa
+                    JOIN Accused a ON sa.AccusedMasterID = a.AccusedMasterID
+                    JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID
+                    ORDER BY sa.AccountID
+                """)
             for r in cur.fetchall():
                 results.append(self._row_to_account(r))
 
         return results
 
+    def _mask(self, num):
+        """Mask account numbers at the API boundary (XXXX-last4)."""
+        if not num:
+            return num
+        s = str(num)
+        return f"XXXX-{s[-4:]}" if len(s) >= 4 else s
+
     def _row_to_account(self, r):
         return {
             "account_id": r[0],
             "accused_master_id": r[1],
-            "account_number": r[2],
+            "account_number": self._mask(r[2]),
             "bank_name": r[3],
             "ifsc": r[4],
             "accused_name": r[5],

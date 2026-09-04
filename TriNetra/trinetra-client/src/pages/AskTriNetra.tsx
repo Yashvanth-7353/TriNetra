@@ -1,11 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, fetchNextBestActions, exportChat, transcribeAudio, translateText, type EvidenceEdge, type EvidenceNode, type NextBestActionLead } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 import EvidenceGraph from '../components/EvidenceGraph';
 import EvidencePanel from '../components/EvidencePanel';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 export interface Message {
   id: string;
@@ -13,6 +13,20 @@ export interface Message {
   text: string;
   intent_detected?: string;
   citations?: string[];
+  case_records?: any[];
+  lookup_scope?: {
+    type?: string;
+    /** Scope verification: 'verified' | 'failed' | 'partial' | 'not_specified' */
+    status?: string;
+    location_requested?: string | null;
+    location_resolved?: string | null;
+    period?: string | null;
+    crime?: string | null;
+    /** Case status filter applied (e.g. 'Charge Sheeted'), if any. */
+    case_status?: string | null;
+    records_found?: number;
+    access?: string;
+  } | null;
   reasoning_trace?: any;
   graph_data?: { 
     nodes: any[]; 
@@ -45,6 +59,28 @@ export interface Message {
       total_patterns: number;
       total_financial_transactions: number;
       total_cross_case_links: number;
+    } | null;
+    structured_evidence?: Array<{
+      finding: string;
+      source_engine: string;
+      type: string;
+      supporting_count: number;
+      case_ids: number[];
+      accused_ids: number[];
+      transaction_ids: number[];
+      scope: { crime?: string | null; district?: string | null; time_window?: string | null };
+      evidence_strength: string;
+      explanation: string;
+    }>;
+    response_card?: {
+      finding: string;
+      evidence: string[];
+      why_it_matters: string;
+      evidence_strength: string;
+      has_sufficient_evidence: boolean;
+      uncertainty_note?: string | null;
+      scope_status: string;
+      primary_engines: string[];
     } | null;
     combined_evidence_graph?: {
       nodes: any[];
@@ -249,6 +285,8 @@ export default function AskTriNetra() {
         text: answerText,
         intent_detected: data.intent_detected,
         citations: data.citations,
+        case_records: data.case_records || undefined,
+        lookup_scope: data.lookup_scope || undefined,
         reasoning_trace: data.reasoning_trace,
         graph_data: data.graph_data,
         analytics_data: data.analytics_data,
@@ -397,6 +435,25 @@ export default function AskTriNetra() {
                   ? "bg-primary-900 text-white rounded-tr-sm" 
                   : "bg-white border border-slate-200 text-slate-800 rounded-tl-sm"
               )}>
+                {/* Investigation Scope indicator — shows how TriNetra understood the question */}
+                {msg.sender === 'bot' && msg.investigation?.plan?.resolved_scope && (
+                  <InvestigationScope scope={msg.investigation.plan.resolved_scope} />
+                )}
+
+                {/* Evidence-first Response Card: FINDING / EVIDENCE / WHY / STRENGTH */}
+                {msg.sender === 'bot' && msg.investigation?.response_card && (
+                  <ResponseCard
+                    card={msg.investigation.response_card}
+                    evidenceGraph={msg.investigation.combined_evidence_graph || null}
+                    inventory={msg.investigation.evidence_inventory || null}
+                  />
+                )}
+
+                {/* Factual case lookup result (deterministic database questions) */}
+                {msg.sender === 'bot' && msg.lookup_scope && (
+                  <FactualLookupResult scope={msg.lookup_scope} records={msg.case_records || []} />
+                )}
+
                 {/* Intent Badge */}
                 {msg.sender === 'bot' && msg.intent_detected && (
                   <div className="flex items-center gap-1.5 mb-3 text-xs font-semibold text-primary-600 bg-primary-50 w-fit px-2 py-1 rounded-md">
@@ -587,6 +644,94 @@ export default function AskTriNetra() {
   );
 }
 
+function FactualLookupResult({ scope, records }: { scope: any; records: any[] }) {
+  const chips: { label: string; value: string; ok?: boolean }[] = [];
+  const isExact = scope?.type === 'exact_case_lookup';
+  if (isExact && scope?.case_id) {
+    chips.push({ label: 'Case', value: String(scope.case_id), ok: scope.status !== 'failed' });
+  }
+  if (scope?.location_resolved) {
+    chips.push({ label: 'Location', value: scope.location_resolved, ok: true });
+  }
+  if (scope?.period) chips.push({ label: 'Period', value: scope.period });
+  if (scope?.crime) chips.push({ label: 'Crime', value: scope.crime });
+  if (scope?.case_status) chips.push({ label: 'Status', value: scope.case_status });
+  chips.push({ label: 'Records', value: String(scope?.records_found ?? 0) });
+  chips.push({
+    label: 'Access',
+    value: scope?.access === 'authorized' ? 'Authorized' : (scope?.access || '—'),
+    ok: scope?.access === 'authorized',
+  });
+
+  const isFailed = scope?.status === 'failed' || scope?.status === 'partial';
+
+  return (
+    <div className="mt-3 mb-4 rounded-xl border border-slate-200 overflow-hidden bg-white">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center gap-2">
+        <span className="text-[10px] font-bold text-primary-700 uppercase tracking-wider">Investigation Scope</span>
+        {isFailed ? (
+          <span className="text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded">
+            ✕ Unresolved
+          </span>
+        ) : (
+          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+            ✓ Verified
+          </span>
+        )}
+      </div>
+
+      <div className="p-3 flex flex-wrap gap-2">
+        {chips.map((chip, i) => (
+          <span
+            key={i}
+            className={cn(
+              "inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded border",
+              chip.ok === false
+                ? "bg-red-50 text-red-700 border-red-200"
+                : "bg-blue-50/50 text-slate-700 border-slate-200"
+            )}
+          >
+            <span className="font-bold uppercase tracking-wide text-slate-400">{chip.label}</span>
+            {chip.value}
+          </span>
+        ))}
+      </div>
+
+      {records.length > 0 && (
+        <div className="border-t border-slate-100 divide-y divide-slate-100">
+          {records.slice(0, 8).map((c: any, i: number) => (
+            <div key={i} className="flex items-center gap-2 px-3 py-2 text-[11px] bg-blue-50/20">
+              <span className="font-bold text-blue-800">
+                {c.crimeno || c.CrimeNo || c.crime_no || `#${c.casemasterid || c.CaseMasterID}`}
+              </span>
+              <span className="text-slate-600 truncate flex-1">
+                {[c.crime_sub_head || c.crime_sub_head_name, c.districtname || c.district, c.police_station]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </span>
+              <span className="text-slate-400 shrink-0">{String(c.crimeregistereddate || c.CrimeRegisteredDate || '').slice(0, 10)}</span>
+              <span className="text-slate-500 shrink-0 hidden sm:inline">{c.casestatusname}</span>
+              <button
+                onClick={() =>
+                  window.open(`/cases?search=${encodeURIComponent(c.crimeno || c.CrimeNo || c.crime_no || c.casemasterid || c.CaseMasterID)}`, '_blank')
+                }
+                className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-white border border-blue-200 text-blue-700 hover:bg-blue-50 shrink-0"
+              >
+                View
+              </button>
+            </div>
+          ))}
+          {(scope?.records_found ?? 0) > records.length && (
+            <div className="px-3 py-1.5 text-[10px] text-slate-400">
+              +{scope.records_found - records.length} more records in the full result
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RiskCard({ data }: { data: any }) {
   const score = data?.score ?? 0;
   const factors = typeof data?.factors === 'string' ? JSON.parse(data.factors || '[]') : (data?.factors || []);
@@ -711,7 +856,6 @@ function InvestigationFindings({ findings, stats, plan, evidenceGraph, evidenceI
   const displayFindings = findings.filter(f =>
     f.category !== 'Investigation Overview' && f.category !== 'Engine Failures'
   );
-  const overview = findings.find(f => f.category === 'Investigation Overview');
   const errors = findings.find(f => f.category === 'Engine Failures');
 
   const hasGraph = evidenceGraph && evidenceGraph.nodes.length > 0;
@@ -1003,6 +1147,30 @@ function InvestigationFindings({ findings, stats, plan, evidenceGraph, evidenceI
                   </div>
                 )}
 
+                {/* Inline Case Records (engine-aware CASE QUERY cards) */}
+                {finding.category === 'Cases Identified' && finding.data?.cases?.length > 0 && !isWhyActive && (
+                  <div className="mt-2 space-y-1">
+                    {finding.data.cases.slice(0, 5).map((c: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 text-[10px] bg-blue-50/50 p-2 rounded border border-blue-100">
+                        <span className="font-bold text-blue-800">{c.crimeno || c.crime_no || c.CrimeNo || `#${c.casemasterid || c.CaseMasterID}`}</span>
+                        <span className="text-slate-600 truncate flex-1">
+                          {[c.crime_sub_head || c.crime_sub_head_name, c.districtname || c.district, c.police_station].filter(Boolean).join(' · ')}
+                        </span>
+                        <span className="text-slate-400">{String(c.crimeregistereddate || '').slice(0, 10)}</span>
+                        <button
+                          onClick={() => window.open(`/cases?search=${c.crimeno || c.crime_no || c.CrimeNo || c.casemasterid || c.CaseMasterID}`, '_blank')}
+                          className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-white border border-blue-200 text-blue-700 hover:bg-blue-50"
+                        >
+                          View
+                        </button>
+                      </div>
+                    ))}
+                    {finding.data.cases.length > 5 && (
+                      <div className="text-[10px] text-slate-400 pl-1">+{finding.data.cases.length - 5} more records</div>
+                    )}
+                  </div>
+                )}
+
                 {/* Inline Risk Profiles */}
                 {finding.category.includes('Risk') && finding.data?.profiles?.length > 0 && !isWhyActive && (
                   <div className="mt-2 space-y-1">
@@ -1052,6 +1220,14 @@ function InvestigationFindings({ findings, stats, plan, evidenceGraph, evidenceI
                         <span className="font-bold text-slate-800">{a.title}</span>
                       </div>
                     ))}
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      <button
+                        onClick={() => window.open('/financial-trail', '_blank')}
+                        className="text-[10px] font-bold px-2 py-1 rounded border bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                      >
+                        Open Financial Trail
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -1124,7 +1300,7 @@ function InvestigationFindings({ findings, stats, plan, evidenceGraph, evidenceI
 //  NEXT BEST INVESTIGATIVE ACTIONS COMPONENT
 // ════════════════════════════════════════════════════════════════
 
-function NextBestActions({ leads, methodology, limitations }: {
+function NextBestActions({ leads, methodology, limitations: _limitations }: {
   leads: NextBestActionLead[];
   methodology: string;
   limitations: string[];
@@ -1382,6 +1558,231 @@ function NextBestActions({ leads, methodology, limitations }: {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  INVESTIGATION SCOPE INDICATOR
+//  Compact card above investigation responses showing exactly how
+//  TriNetra understood the investigator's question (and whether
+//  every explicitly requested scope could be resolved).
+// ════════════════════════════════════════════════════════════════
+
+function InvestigationScope({ scope }: { scope: any }) {
+  const status = scope.status || 'not_specified';
+  const crime = scope.crime || {};
+  const district = scope.district || {};
+  const tw = scope.time_window || {};
+  // Entity-first exact case lookups: one record, show the resolved FIR/case
+  const exact = scope.exact_case || null;
+
+  const statusConfig: Record<string, { label: string; cls: string }> = {
+    verified: { label: '✓ Scope verified', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+    partial: { label: '⚠ Scope partially resolved', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+    failed: { label: '✕ Scope could not be resolved', cls: 'bg-red-50 text-red-700 border-red-200' },
+    not_specified: { label: 'Scope not specified', cls: 'bg-slate-50 text-slate-600 border-slate-200' },
+  };
+  const cfg = statusConfig[status] || statusConfig.not_specified;
+
+  return (
+    <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50/80 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-white border-b border-slate-100">
+        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Investigation Scope</span>
+        <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full border', cfg.cls)}>{cfg.label}</span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 px-3 py-2">
+        {exact && (
+          <ScopeItem
+            label="Case"
+            value={exact.crime_no || exact.identifier || '—'}
+            resolved={!!exact.record_found}
+          />
+        )}
+        <ScopeItem label="Crime" value={crime.resolved_name || crime.requested || '—'} resolved={!!crime.resolved} />
+        <ScopeItem label="Location" value={district.resolved_name || district.requested || '—'} resolved={!!district.resolved} />
+        <ScopeItem label="Period" value={tw.label || tw.requested || '—'} resolved={!!tw.resolved} />
+        <ScopeItem
+          label="Engines"
+          value={(scope.engines || []).length > 0 ? (scope.engines as string[]).map(e => e.replace('_', ' ')).join(' • ') : (exact ? 'exact case lookup' : '—')}
+          resolved={true}
+        />
+      </div>
+      {scope.warnings && scope.warnings.length > 0 && (
+        <div className="px-3 pb-2 space-y-1">
+          {scope.warnings.map((w: any, i: number) => (
+            <div key={i} className="text-[10px] text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1">
+              {w.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScopeItem({ label, value, resolved }: { label: string; value: string; resolved: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{label}</div>
+      <div
+        className={cn('text-[11px] font-semibold truncate', resolved ? 'text-slate-800' : 'text-red-600')}
+        title={value}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  EVIDENCE-FIRST RESPONSE CARD
+//  Presents the investigation as:
+//      FINDING → EVIDENCE → WHY IT MATTERS → EVIDENCE STRENGTH
+//  with drill-downs to the evidence graph and case records.
+//  All content comes from the backend's deterministic response card
+//  (real engine output) — the LLM summary is shown separately below.
+// ════════════════════════════════════════════════════════════════
+
+function ResponseCard({ card, evidenceGraph, inventory }: {
+  card: NonNullable<NonNullable<Message['investigation']>['response_card']>;
+  evidenceGraph: { nodes: EvidenceNode[]; edges: EvidenceEdge[] } | null;
+  inventory: any;
+}) {
+  const [showWhy, setShowWhy] = useState(false);
+  const [showGraph, setShowGraph] = useState(false);
+
+  const hasGraph = !!(evidenceGraph && evidenceGraph.nodes.length > 0);
+  const firstCrimeNo = inventory?.crime_nos?.[0];
+  const hasFinancial = !!inventory?.has_financial_evidence;
+  const insufficient = !card.has_sufficient_evidence;
+
+  const strengthConfig: Record<string, { label: string; cls: string }> = {
+    strong: { label: 'STRONG', cls: 'bg-emerald-600 text-white border-emerald-600' },
+    moderate: { label: 'MODERATE', cls: 'bg-amber-500 text-white border-amber-500' },
+    limited: { label: 'LIMITED', cls: 'bg-slate-500 text-white border-slate-500' },
+    none: { label: 'INSUFFICIENT', cls: 'bg-red-600 text-white border-red-600' },
+  };
+  const strength = strengthConfig[card.evidence_strength] || strengthConfig.limited;
+
+  return (
+    <div className="mb-3 border border-indigo-200 rounded-xl overflow-hidden bg-white">
+      {/* FINDING header */}
+      <div className="px-3 py-2 border-b border-indigo-100 flex items-center justify-between gap-2 bg-indigo-50/40">
+        <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider">Finding</span>
+        <span className={cn('text-[9px] font-bold px-2 py-0.5 rounded-full border', strength.cls)}>
+          {strength.label} EVIDENCE
+        </span>
+      </div>
+      <div className="p-3 space-y-2.5">
+        <p className={cn('text-sm font-semibold leading-relaxed', insufficient ? 'text-red-700' : 'text-slate-800')}>
+          {card.finding}
+        </p>
+
+        {/* Insufficient / uncertainty notice */}
+        {insufficient && card.uncertainty_note && (
+          <div className="text-[11px] text-red-700 bg-red-50 border border-red-100 rounded-lg px-2.5 py-2 leading-relaxed">
+            {card.uncertainty_note}
+          </div>
+        )}
+
+        {/* EVIDENCE bullets */}
+        {card.evidence.length > 0 && (
+          <div className="space-y-1">
+            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Evidence</div>
+            {card.evidence.map((ev: string, i: number) => (
+              <div key={i} className="flex items-start gap-1.5 text-[11px] text-slate-600 leading-relaxed">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0"></span>
+                {ev}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* WHY IT MATTERS */}
+        {card.why_it_matters && (
+          <div className="bg-slate-50 border border-slate-100 rounded-lg px-2.5 py-2">
+            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Why it matters</div>
+            <p className="text-[11px] text-slate-600 leading-relaxed">{card.why_it_matters}</p>
+          </div>
+        )}
+
+        {/* Drill-down buttons */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+          <button
+            onClick={() => setShowWhy(!showWhy)}
+            className={cn(
+              'text-[10px] font-bold px-2 py-1 rounded border transition-all',
+              showWhy ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+            )}
+          >
+            Why this finding?
+          </button>
+          {hasGraph && (
+            <button
+              onClick={() => setShowGraph(!showGraph)}
+              className={cn(
+                'text-[10px] font-bold px-2 py-1 rounded border transition-all',
+                showGraph ? 'bg-primary-900 text-white border-primary-900' : 'bg-primary-50 text-primary-700 border-primary-200 hover:bg-primary-100'
+              )}
+            >
+              Evidence Graph
+            </button>
+          )}
+          {firstCrimeNo && (
+            <button
+              onClick={() => window.open(`/cases?search=${firstCrimeNo}`, '_blank')}
+              className="text-[10px] font-bold px-2 py-1 rounded border bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+            >
+              View Cases
+            </button>
+          )}
+          {hasFinancial && (
+            <button
+              onClick={() => window.open('/financial-trail', '_blank')}
+              className="text-[10px] font-bold px-2 py-1 rounded border bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+            >
+              Open Financial Trail
+            </button>
+          )}
+        </div>
+
+        {/* Why this finding? — evidence chain */}
+        {showWhy && (
+          <div className="border-t border-slate-100 pt-2 space-y-1">
+            <div className="text-[9px] font-bold text-indigo-500 uppercase tracking-wider mb-1">Evidence chain</div>
+            {(card.primary_engines || []).map((eng: string, i: number) => (
+              <div key={i} className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                <span className="font-mono text-slate-400">{String(i + 1).padStart(2, '0')}</span>
+                <span className="font-semibold text-slate-700">{eng.replace('_', ' ')}</span>
+                <span className="text-slate-300">→</span>
+              </div>
+            ))}
+            {card.evidence.map((ev: string, i: number) => (
+              <div key={`ev-${i}`} className="flex items-start gap-1.5 text-[10px] text-slate-500">
+                <span className="font-mono text-slate-400">{String((card.primary_engines || []).length + i + 1).padStart(2, '0')}</span>
+                {ev}
+              </div>
+            ))}
+            <div className="flex items-center gap-1.5 text-[10px] text-indigo-700 font-semibold pt-1">
+              <span className="font-mono text-indigo-400">→</span>
+              {card.finding}
+            </div>
+          </div>
+        )}
+
+        {/* Evidence Graph inline */}
+        {showGraph && hasGraph && evidenceGraph && (
+          <div className="border-t border-slate-100 pt-2">
+            <div className="text-[9px] font-bold text-primary-600 uppercase tracking-wider mb-1">
+              Evidence Network ({evidenceGraph.nodes.length} entities, {evidenceGraph.edges.length} relationships)
+            </div>
+            <div className="h-[300px] rounded-lg border border-slate-200 overflow-hidden bg-slate-50">
+              <EvidenceGraph nodes={evidenceGraph.nodes} edges={evidenceGraph.edges} compact={true} />
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

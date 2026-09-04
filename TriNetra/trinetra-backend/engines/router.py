@@ -1,11 +1,37 @@
 import os
 import json
 from groq import Groq
-import re # Make sure 're' is imported at the top of router.py
+import re  # Make sure 're' is imported at the top of router.py
+
+from engines.intent_classifier import DeterministicIntentClassifier
+
+
+# Canonical engine names used by the /api/chat endpoint. The deterministic
+# classifier may produce intent labels outside this list (e.g. exact_case_lookup,
+# pattern_detection, financial_analysis) — those are translated to the closest
+# chat-routable engine here, or left for the multi-engine investigation path.
+CHAT_ENGINE_MAP = {
+    "exact_case_lookup": "exact_case_lookup",
+    "case_search": "factual_lookup",
+    "case_similarity": "case_similarity",
+    "narrative_similarity": "narrative_rag",
+    "pattern_detection": "pattern_detection",
+    "trend_analysis": "trend_analysis",
+    "criminal_network": "criminal_network",
+    "financial_analysis": "financial_intelligence",
+    "behaviour_analysis": "pattern_detection",
+    "risk_analysis": "risk_profile",
+    "forecasting": "forecasting",
+    "evidence_graph": "criminal_network",
+    "next_best_action": "next_best_action",
+    "general_investigation": "investigation",
+}
+
 
 class IntentRouter:
     def __init__(self):
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
+        self.classifier = DeterministicIntentClassifier()
 
     def rewrite_to_standalone(self, query: str, history: list) -> str:
         """
@@ -41,12 +67,35 @@ class IntentRouter:
         except Exception:
             return query
 
-    def classify_intent(self, query: str) -> dict:
+    def classify_intent(self, query: str, investigation_context: dict = None) -> dict:
         """
-        Classifies a standalone query into one of six core orchestration engines.
+        Classifies a standalone query into an engine layer.
+
+        The DETERMINISTIC central routing policy runs first — it cannot be
+        overridden by the LLM. When no deterministic rule matches, the LLM
+        classifies into one of the six classic chat engines.
+
+        Returns {"engine": str, "reasoning": str, "intent": str|None,
+                 "requires_context": bool, "deterministic": bool}
         """
+        det = self.classifier.classify(query, investigation_context=investigation_context)
+        if det.get("matched"):
+            engine = CHAT_ENGINE_MAP.get(det["intent"], "factual_lookup")
+            return {
+                "engine": engine,
+                "reasoning": det.get("reasoning", "deterministic routing"),
+                "intent": det["intent"],
+                "requires_context": det.get("requires_context", False),
+                "deterministic": True,
+            }
         if not self.groq_client:
-            return {"engine": "factual_lookup", "reasoning": "Fallback mode active."}
+            return {
+                "engine": "factual_lookup",
+                "reasoning": "Fallback mode active.",
+                "intent": "case_search",
+                "requires_context": False,
+                "deterministic": False,
+            }
 
         prompt = f"""
         Analyze the incoming standalone investigator query and categorize it into EXACTLY one engine layer:
@@ -70,18 +119,28 @@ class IntentRouter:
                 response_format={"type": "json_object"}
             )
             result = json.loads(response.choices[0].message.content)
-            valid_engines = ["factual_lookup", "criminal_network", "trend_analysis", "risk_profile", "narrative_rag", "case_similarity"]
+            valid_engines = ["factual_lookup", "criminal_network", "trend_analysis",
+                             "risk_profile", "narrative_rag", "case_similarity"]
             if result.get("engine") not in valid_engines:
                 result["engine"] = "factual_lookup"
+            result["intent"] = None
+            result["requires_context"] = False
+            result["deterministic"] = False
             return result
         except Exception as e:
-            return {"engine": "factual_lookup", "reasoning": f"Default fallback. Error: {str(e)}"}
-        
+            return {
+                "engine": "factual_lookup",
+                "reasoning": f"Default fallback. Error: {str(e)}",
+                "intent": None,
+                "requires_context": False,
+                "deterministic": False,
+            }
+
     def extract_accused_id(self, query: str) -> int:
         """Extracts the Accused ID from a query to use as a graph traversal starting point."""
         if not self.groq_client:
             return 0
-            
+
         prompt = f"""
         Extract the Accused ID (an integer) from the following investigator query.
         If no explicit ID is found, return 0.

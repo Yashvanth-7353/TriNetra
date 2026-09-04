@@ -2,7 +2,7 @@ import os
 import time
 import json
 import re
-from fastapi import FastAPI, HTTPException, Header, Query, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, Header, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -28,8 +28,12 @@ from engines.network_engine import NetworkEngine
 network_engine = NetworkEngine()
 from engines.sarvam_engine import sarvam_engine
 from engines.investigation import InvestigationEngine
+from engines.intent_classifier import DeterministicIntentClassifier
+from engines.factual_lookup import FactualCaseLookup
+from engines.exact_case import ExactCaseResolver
 from engines.evidence_graph import EvidenceGraphBuilder
 from engines.forecasting import CrimeForecastingEngine
+from engines.prevention_alerts import PreventionAlertsEngine
 from engines.predictive_hotspots import PredictiveHotspotEngine
 from engines.next_best_action import NextBestActionEngine
 from engines.financial_intelligence import FinancialIntelligenceEngine, FinancialLeadGenerator
@@ -42,6 +46,7 @@ predictive_hotspot_engine = PredictiveHotspotEngine()
 next_best_action_engine = NextBestActionEngine()
 financial_intelligence_engine = FinancialIntelligenceEngine()
 financial_lead_generator = FinancialLeadGenerator()
+prevention_alerts_engine = PreventionAlertsEngine()
 
 app = FastAPI(title="TriNetra Intelligence Orchestrator Core Node")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -92,6 +97,42 @@ def _extract_auth_context(authorization: Optional[str]) -> dict:
     }
 
 
+def _require_auth(authorization: Optional[str]) -> dict:
+    """Mandatory auth for data endpoints: raises 401 when the JWT is missing/invalid."""
+    return _extract_auth_context(authorization)
+
+
+def _is_statewide_role(role: str) -> bool:
+    """Analyst/Policymaker are state-wide per the RBAC model (security.py)."""
+    return role in ("Analyst", "Policymaker")
+
+
+def _jurisdiction_rbac_filter(role: str, district_id, unit_id) -> str:
+    """Server-generated row-level security condition for the given role.
+
+    Mirrors SecurityContext.build_rbac_filter so every data surface applies the
+    same rule as the chat/NL2SQL path: Investigator → station, Supervisor →
+    district, Analyst/Policymaker → state-wide (1=1), unknown role → deny.
+    """
+    return security_context.build_rbac_filter(
+        role=role,
+        employee_district_id=district_id or 0,
+        employee_unit_id=unit_id or 0,
+    )
+
+
+def _effective_district_scope(auth_ctx: dict, requested_district_id: Optional[int]) -> Optional[int]:
+    """Returns the district an analytics query may actually see.
+
+    Investigator/Supervisor are jurisdiction-bound: they may only request their
+    own district. Analyst/Policymaker may request any district (state-wide).
+    """
+    role = auth_ctx["role"]
+    if _is_statewide_role(role):
+        return requested_district_id
+    return auth_ctx.get("district_id")
+
+
 @app.post("/api/login")
 async def login(request: LoginRequest):
     """Authenticates employee and returns JWT token + profile."""
@@ -119,8 +160,9 @@ async def get_profile(authorization: Optional[str] = Header(None)):
 # ──────────────────────────────────────────────
 
 @app.get("/api/cases/filters")
-async def get_case_filters():
+async def get_case_filters(authorization: Optional[str] = Header(None)):
     """Returns dropdown options for district, status, category, and crime head filters."""
+    _require_auth(authorization)
     result = case_explorer_engine.get_filter_options()
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
@@ -138,8 +180,13 @@ async def search_cases(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(None),
 ):
-    """Paginated, filterable case search."""
+    """Paginated, filterable case search (row-level RBAC enforced)."""
+    auth_ctx = _require_auth(authorization)
+    rbac_filter = _jurisdiction_rbac_filter(
+        auth_ctx["role"], auth_ctx.get("district_id"), auth_ctx.get("unit_id")
+    )
     result = case_explorer_engine.search_cases(
         district_id=district_id,
         status_id=status_id,
@@ -150,16 +197,30 @@ async def search_cases(
         search_term=search,
         page=page,
         page_size=page_size,
+        rbac_filter=rbac_filter,
     )
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
+    result["rbac"] = _rbac_scope_label(rbac_filter, auth_ctx["role"])
     return {"status": "success", **result}
 
 
 @app.get("/api/cases/{case_id}")
-async def get_case_detail(case_id: int):
-    """Returns full case detail including timeline, people, and chargesheet."""
-    result = case_explorer_engine.get_case_detail(case_id)
+async def get_case_detail(
+    case_id: int,
+    authorization: Optional[str] = Header(None),
+):
+    """Returns full case detail including timeline, people, and chargesheet.
+
+    Row-level RBAC is enforced: an Investigator/Supervisor outside the case's
+    jurisdiction receives 404 (identical to an unknown case) so cross-district
+    case data can never leak through this endpoint.
+    """
+    auth_ctx = _require_auth(authorization)
+    rbac_filter = _jurisdiction_rbac_filter(
+        auth_ctx["role"], auth_ctx.get("district_id"), auth_ctx.get("unit_id")
+    )
+    result = case_explorer_engine.get_case_detail(case_id, rbac_filter=rbac_filter)
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return {"status": "success", **result}
@@ -172,9 +233,12 @@ async def get_case_detail(case_id: int):
 async def get_analytics_summary(
     district_id: Optional[int] = Query(None),
     time_window: Optional[str] = Query(None),
-    category_id: Optional[int] = Query(None)
+    category_id: Optional[int] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns analytics dashboard KPI summary stats."""
+    """Returns analytics dashboard KPI summary stats (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_summary(
         district_id=district_id,
         time_window=time_window,
@@ -189,9 +253,12 @@ async def get_analytics_summary(
 async def get_analytics_hotspots(
     district_id: Optional[int] = Query(None),
     time_window: Optional[str] = Query(None),
-    category_id: Optional[int] = Query(None)
+    category_id: Optional[int] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns coordinate list for Leaflet map hotspot visualization."""
+    """Returns coordinate list for Leaflet map hotspot visualization (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_hotspots(
         district_id=district_id,
         time_window=time_window,
@@ -206,9 +273,12 @@ async def get_analytics_hotspots(
 async def get_analytics_trends(
     district_id: Optional[int] = Query(None),
     time_window: Optional[str] = Query(None),
-    category_id: Optional[int] = Query(None)
+    category_id: Optional[int] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns historical crime count trend and category breakdowns."""
+    """Returns historical crime count trend and category breakdowns (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_trends(
         district_id=district_id,
         time_window=time_window,
@@ -228,15 +298,26 @@ async def get_analytics_offenders(
     sort_order: Optional[str] = Query("desc"),
     authorization: Optional[str] = Header(None)
 ):
-    """Returns paginated, searchable list of offender profiles and risk scores."""
-    try:
-        payload = verify_jwt_token(authorization)
-        profile = get_employee_profile(payload["employee_id"])
-        unit_id = profile.get("station_id")
-        district_id = profile.get("district_id")
-    except Exception:
+    """Returns paginated, searchable list of offender profiles and risk scores.
+
+    Row-level RBAC mirrors the chat path: Investigator → offenders linked to
+    cases at their own station; Supervisor → offenders in their own district;
+    Analyst/Policymaker → state-wide.
+    """
+    auth_ctx = _require_auth(authorization)
+    role = auth_ctx["role"]
+    if _is_statewide_role(role):
         unit_id = None
         district_id = None
+    elif role == "Investigator":
+        unit_id = auth_ctx.get("unit_id")
+        district_id = None
+    elif role == "Supervisor":
+        unit_id = None
+        district_id = auth_ctx.get("district_id")
+    else:
+        # Unknown role: deny rather than widen
+        raise HTTPException(status_code=403, detail="Insufficient permissions for offender profiles.")
 
     offset = (page - 1) * page_size
     result = analytics_engine.get_offenders(
@@ -256,10 +337,18 @@ async def get_analytics_offenders(
 async def get_emerging_patterns(
     authorization: Optional[str] = Header(None)
 ):
-    """Returns the dynamic feed of emerging case clusters and patterns."""
-    result = pattern_engine.get_emerging_patterns()
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
+    """Returns the dynamic feed of emerging case clusters and patterns.
+
+    Investigator/Supervisor roles only see clusters within their own district;
+    Analyst/Policymaker see the state-wide feed.
+    """
+    auth_ctx = _require_auth(authorization)
+    if _is_statewide_role(auth_ctx["role"]):
+        result = pattern_engine.get_emerging_patterns()
+    else:
+        result = pattern_engine.get_scoped_patterns(district_id=auth_ctx.get("district_id"))
+    if "error" in result or result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("error") or "Pattern engine error.")
     return {"status": "success", **result}
 
 
@@ -269,41 +358,58 @@ async def get_similar_cases(
     k: int = Query(10, ge=1, le=50),
     authorization: Optional[str] = Header(None)
 ):
-    """Returns ranked list of similar cases using pgvector, MO overlap, and geo-proximity."""
+    """Returns ranked list of similar cases using pgvector, MO overlap, and geo-proximity.
+
+    For jurisdiction-bound roles the reference case itself must belong to the
+    caller's scope, otherwise 404 (same as an unknown case).
+    """
+    auth_ctx = _require_auth(authorization)
+    rbac_filter = _jurisdiction_rbac_filter(
+        auth_ctx["role"], auth_ctx.get("district_id"), auth_ctx.get("unit_id")
+    )
+    if rbac_filter.strip() != "1=1" and not case_explorer_engine.is_case_in_scope(case_id, rbac_filter):
+        raise HTTPException(status_code=404, detail=f"Case {case_id} not found in authorized records.")
     result = pattern_engine.find_similar_cases(case_id=case_id, k=k)
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
+    if "error" in result or result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("error") or "Similarity engine error.")
     return {"status": "success", **result}
+
 
 @app.get("/api/analytics/alerts")
 async def get_analytics_alerts(
     district_id: Optional[int] = Query(None),
     authorization: Optional[str] = Header(None)
 ):
-    """Returns prevention alerts computed for the logged in employee jurisdiction only."""
-    if authorization:
-        try:
-            auth_ctx = _extract_auth_context(authorization)
-            district_id = auth_ctx["district_id"]
-        except Exception:
-            pass
-            
-    if not district_id:
-        district_id = 2
-        
-    result = analytics_engine.get_prevention_alerts(district_id=district_id)
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-    return {"status": "success", **result}
+    """Returns prevention alerts computed for the logged in employee jurisdiction only.
+
+    Jurisdiction is resolved server-side from the authenticated profile:
+    Investigator → own station, Supervisor → own district, Analyst/Policymaker →
+    state-wide (optionally narrowed by district_id). An explicit district_id can
+    never widen a jurisdiction-bound role's scope.
+    """
+    auth_ctx = _require_auth(authorization)
+    result = prevention_alerts_engine.generate_alerts(
+        role=auth_ctx["role"],
+        employee_district_id=auth_ctx.get("district_id"),
+        employee_unit_id=auth_ctx.get("unit_id"),
+        requested_district_id=district_id,
+    )
+    if result.get("status") in ("denied", "error"):
+        status_code = 403 if result.get("status") == "denied" else 500
+        raise HTTPException(status_code=status_code, detail=result.get("error") or "Prevention alerts engine error.")
+    return result
 
 
 @app.get("/api/analytics/geographic")
 async def get_analytics_geographic(
     district_id: Optional[int] = Query(None),
     time_window: Optional[str] = Query(None),
-    category_id: Optional[int] = Query(None)
+    category_id: Optional[int] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns grid hotspots and district rankings."""
+    """Returns grid hotspots and district rankings (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_geographic(
         district_id=district_id, time_window=time_window, category_id=category_id
     )
@@ -315,9 +421,12 @@ async def get_analytics_geographic(
 @app.get("/api/analytics/trends-advanced")
 async def get_analytics_trends_advanced(
     district_id: Optional[int] = Query(None),
-    category_id: Optional[int] = Query(None)
+    category_id: Optional[int] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns YoY category comparisons and anomaly callout trends."""
+    """Returns YoY category comparisons and anomaly callout trends (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_trends_advanced(
         district_id=district_id, category_id=category_id
     )
@@ -329,9 +438,12 @@ async def get_analytics_trends_advanced(
 @app.get("/api/analytics/categorical")
 async def get_analytics_categorical(
     district_id: Optional[int] = Query(None),
-    time_window: Optional[str] = Query(None)
+    time_window: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns crime head distributions, gravity splits, and top MO tags."""
+    """Returns crime head distributions, gravity splits, and top MO tags (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_categorical(
         district_id=district_id, time_window=time_window
     )
@@ -343,9 +455,12 @@ async def get_analytics_categorical(
 @app.get("/api/analytics/lifecycle")
 async def get_analytics_lifecycle(
     district_id: Optional[int] = Query(None),
-    time_window: Optional[str] = Query(None)
+    time_window: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns status funnel and chargesheet outcomes."""
+    """Returns status funnel and chargesheet outcomes (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_lifecycle(
         district_id=district_id, time_window=time_window
     )
@@ -358,9 +473,12 @@ async def get_analytics_lifecycle(
 async def get_analytics_reporting_lag(
     district_id: Optional[int] = Query(None),
     time_window: Optional[str] = Query(None),
-    category_id: Optional[int] = Query(None)
+    category_id: Optional[int] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns FIR reporting lag distribution."""
+    """Returns FIR reporting lag distribution (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_reporting_lag(
         district_id=district_id, time_window=time_window, category_id=category_id
     )
@@ -372,9 +490,12 @@ async def get_analytics_reporting_lag(
 @app.get("/api/analytics/demographics")
 async def get_analytics_demographics(
     district_id: Optional[int] = Query(None),
-    time_window: Optional[str] = Query(None)
+    time_window: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None)
 ):
-    """Returns victim/complainant socio-demographics enforcing n>=10 privacy threshold."""
+    """Returns victim/complainant socio-demographics enforcing n>=10 privacy threshold (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    district_id = _effective_district_scope(auth_ctx, district_id)
     result = analytics_engine.get_analytics_demographics(
         district_id=district_id, time_window=time_window
     )
@@ -388,16 +509,41 @@ async def get_analytics_demographics(
 #  Network Analysis REST Endpoints
 # ──────────────────────────────────────────────
 
+def _network_scope(auth_ctx: dict):
+    """Returns (unit_id, district_id) jurisdiction for network endpoints.
+    Investigator → own station; Supervisor → own district; statewide → (None, None)."""
+    role = auth_ctx["role"]
+    if role == "Investigator":
+        return auth_ctx.get("unit_id"), None
+    if role == "Supervisor":
+        return None, auth_ctx.get("district_id")
+    return None, None
+
+
 @app.get("/api/network/search")
-async def network_search(q: str = Query(..., min_length=1), limit: int = Query(15, ge=1, le=50)):
-    """Search accused by name or ID for the network search box."""
-    results = network_engine.search_accused(q, limit=limit)
+async def network_search(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(15, ge=1, le=50),
+    authorization: Optional[str] = Header(None),
+):
+    """Search accused by name or ID for the network search box (jurisdiction-scoped)."""
+    auth_ctx = _require_auth(authorization)
+    unit_id, district_id = _network_scope(auth_ctx)
+    results = network_engine.search_accused(q, limit=limit, unit_id=unit_id, district_id=district_id)
     return {"status": "success", "results": results}
 
 
 @app.get("/api/network/node/{accused_id}")
-async def get_network_node_detail(accused_id: int, layers: Optional[str] = Query(None)):
+async def get_network_node_detail(
+    accused_id: int,
+    layers: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
     """Returns detailed info about a specific node for the side panel."""
+    auth_ctx = _require_auth(authorization)
+    unit_id, district_id = _network_scope(auth_ctx)
+    if not network_engine.accused_in_scope(accused_id, unit_id=unit_id, district_id=district_id):
+        raise HTTPException(status_code=404, detail=f"Accused {accused_id} not found in authorized records.")
     active_layers = layers.split(",") if layers else None
     result = network_engine.get_node_detail(accused_id, active_layers=active_layers)
     if "error" in result:
@@ -406,8 +552,17 @@ async def get_network_node_detail(accused_id: int, layers: Optional[str] = Query
 
 
 @app.get("/api/network/{accused_id}")
-async def get_network(accused_id: int, hops: int = Query(2, ge=1, le=3), layers: Optional[str] = Query(None)):
+async def get_network(
+    accused_id: int,
+    hops: int = Query(2, ge=1, le=3),
+    layers: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
     """Returns the N-hop criminal network graph with community detection."""
+    auth_ctx = _require_auth(authorization)
+    unit_id, district_id = _network_scope(auth_ctx)
+    if not network_engine.accused_in_scope(accused_id, unit_id=unit_id, district_id=district_id):
+        raise HTTPException(status_code=404, detail=f"Accused {accused_id} not found in authorized records.")
     active_layers = layers.split(",") if layers else None
     result = network_engine.get_network(accused_id, max_hops=hops, active_layers=active_layers)
     if "error" in result:
@@ -440,39 +595,159 @@ def get_investigation_context(session_id: str) -> dict:
         return session_profile.get("investigation")
     return None
 
-def set_investigation_context(session_id: str, investigation_result: dict):
-    """Stores the investigation result for multi-turn follow-up queries."""
+def _extract_context_entities(investigation_result: dict):
+    """Pulls discovered case/accused/account identifiers out of a finished
+    investigation result (findings + plan). Handles the data shapes produced
+    by the case, network, similarity and financial engines."""
+    cases = []
+    accused = []
+    for finding in investigation_result.get("investigation", {}).get("findings", []):
+        data = finding.get("data", {}) or {}
+        for key, rows in data.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                cid = row.get("casemasterid") or row.get("CaseMasterID") or row.get("case_id")
+                if cid:
+                    try:
+                        cases.append(int(cid))
+                    except (TypeError, ValueError):
+                        pass
+                aid = (row.get("accused_id") or row.get("AccusedID")
+                       or row.get("accusedmasterid") or row.get("AccusedMasterID"))
+                if aid:
+                    try:
+                        accused.append(int(aid))
+                    except (TypeError, ValueError):
+                        pass
+        for list_key in ("cases", "similar_cases", "nodes", "profiles", "accounts",
+                         "accused", "transactions", "links", "suspects"):
+            rows = data.get(list_key, []) or []
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                cid = row.get("casemasterid") or row.get("CaseMasterID") or row.get("case_id")
+                if cid:
+                    try:
+                        cases.append(int(cid))
+                    except (TypeError, ValueError):
+                        pass
+                aid = (row.get("accused_id") or row.get("AccusedID")
+                       or row.get("accusedmasterid") or row.get("AccusedMasterID"))
+                if aid:
+                    try:
+                        accused.append(int(aid))
+                    except (TypeError, ValueError):
+                        pass
+    plan = investigation_result.get("investigation", {}).get("plan", {}) or {}
+    for cid in (plan.get("entities", {}) or {}).get("case_ids", []) or []:
+        try:
+            cases.append(int(cid))
+        except (TypeError, ValueError):
+            pass
+    for aid in (plan.get("entities", {}) or {}).get("accused_ids", []) or []:
+        try:
+            accused.append(int(aid))
+        except (TypeError, ValueError):
+            pass
+    for aid in (plan.get("exact_case") or {}).get("accused_ids", []) or []:
+        try:
+            accused.append(int(aid))
+        except (TypeError, ValueError):
+            pass
+    return list(dict.fromkeys(cases)), list(dict.fromkeys(accused))
+
+
+def set_investigation_context(session_id: str, investigation_result: dict,
+                              request_text: str = None):
+    """Stores the investigation result for multi-turn follow-up queries.
+
+    Follow-up turns ("show its financial trail", "who is connected to them")
+    inherit the previously discovered cases/accused. A question that defines a
+    NEW scope ("now find burglary cases in Mysuru") deliberately replaces the
+    context so the old FIR/district never leaks into it.
+    """
+    current_time = time.time()
+    previous = None
+    if session_id in session_store:
+        prev = session_store[session_id].get("investigation")
+        if prev and (current_time - session_store[session_id].get("last_active", 0) < SESSION_TTL_SECONDS):
+            previous = prev
+    if session_id not in session_store:
+        session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
+
+    cases, accused = _extract_context_entities(investigation_result)
+    new_scope = False
+    if request_text:
+        try:
+            new_scope = DeterministicIntentClassifier().defines_new_scope(request_text)
+        except Exception:
+            new_scope = False
+    if previous and not new_scope:
+        # Follow-up: keep entities already known from earlier turns so a
+        # financial/network step never forgets the accused it just discovered.
+        cases = list(dict.fromkeys(previous.get("discovered_cases", []) + cases))
+        accused = list(dict.fromkeys(previous.get("discovered_accused", []) + accused))
+
+    session_store[session_id]["investigation"] = {
+        "plan": investigation_result.get("investigation", {}).get("plan", {}),
+        "resolved_scope": investigation_result.get("investigation", {}).get("plan", {}).get("resolved_scope"),
+        "discovered_cases": cases,
+        "discovered_accused": accused,
+        "timestamp": current_time,
+    }
+
+
+def store_exact_case_context(session_id: str, exact_result: dict):
+    """
+    Stores an exact-case answer as investigation context so a follow-up like
+    "who is connected to it?" retains the exact FIR instead of resetting to a
+    state-wide search. The stored scope deliberately carries NO crime/location
+    filters — the discovered case ID is the context, never a broad filter.
+    """
     current_time = time.time()
     if session_id not in session_store:
         session_store[session_id] = {"turns": [], "last_active": current_time, "investigation": None}
+    record = (exact_result.get("cases") or [None])[0]
+    discovered_cases = []
+    discovered_accused = []
+    if record and record.get("casemasterid"):
+        discovered_cases.append(int(record["casemasterid"]))
+    for a in exact_result.get("accused") or []:
+        if a.get("accused_id"):
+            discovered_accused.append(int(a["accused_id"]))
     session_store[session_id]["investigation"] = {
-        "plan": investigation_result.get("investigation", {}).get("plan", {}),
-        "discovered_cases": [],
-        "discovered_accused": [],
+        "plan": {
+            "filters": {
+                "crime_category": None,
+                "district_name": None,
+                "time_window": None,
+                "limit": None,
+            },
+            "engines": ["case_query"],
+        },
+        "resolved_scope": exact_result.get("scope") or {},
+        "discovered_cases": discovered_cases,
+        "discovered_accused": discovered_accused,
         "timestamp": current_time,
     }
-    # Extract discovered entities from findings
-    for finding in investigation_result.get("investigation", {}).get("findings", []):
-        data = finding.get("data", {})
-        for case in data.get("cases", []):
-            cid = case.get("casemasterid") or case.get("CaseMasterID")
-            if cid:
-                session_store[session_id]["investigation"]["discovered_cases"].append(int(cid))
-        for match in data.get("similar_cases", []):
-            cid = match.get("case_id")
-            if cid:
-                session_store[session_id]["investigation"]["discovered_cases"].append(int(cid))
-        for profile in data.get("profiles", []):
-            aid = profile.get("accused_id")
-            if aid:
-                session_store[session_id]["investigation"]["discovered_accused"].append(int(aid))
-        for node in data.get("nodes", []):
-            aid = node.get("accused_id")
-            if aid:
-                session_store[session_id]["investigation"]["discovered_accused"].append(int(aid))
-    # Deduplicate
-    session_store[session_id]["investigation"]["discovered_cases"] = list(set(session_store[session_id]["investigation"]["discovered_cases"]))
-    session_store[session_id]["investigation"]["discovered_accused"] = list(set(session_store[session_id]["investigation"]["discovered_accused"]))
+
+
+def _rbac_scope_label(rbac_filter: str, role: str) -> str:
+    """Human-readable label for the server-generated RBAC condition."""
+    f = (rbac_filter or "").strip()
+    if f == "1=1":
+        return f"RBAC enforced ({role}) — state-wide access"
+    if "PoliceStationID" in f:
+        return f"RBAC enforced ({role}) — station-scoped access"
+    if "DistrictID" in f:
+        return f"RBAC enforced ({role}) — district-scoped access"
+    return f"RBAC enforced ({role})"
+
 
 def synthesize_structural_response(user_query: str, records: list) -> str:
     """Synthesizes database record blocks into highly pristine natural intelligence summaries."""
@@ -523,11 +798,32 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 
     try:
         active_memory = access_context_memory(request.session_token)
+        # Pass the previous investigation context so follow-ups like
+        # "show the financial trail" are classified as context-requiring
+        # intents (never a broad case search).
+        inv_ctx = get_investigation_context(request.session_token)
         standalone_q = request.query
-        if active_memory:
+
+        # Deterministic follow-up detection: when the RAW user query refers
+        # back to an active investigation ("show their transaction trail",
+        # "who is connected to it?"), skip the LLM context rewrite. The
+        # rewrite is nondeterministic and can strip the follow-up anchor
+        # ("their"), which would make the planner lose the entity context.
+        # A follow-up that already carries context is self-sufficient.
+        det_orig = DeterministicIntentClassifier().classify(
+            request.query, investigation_context=inv_ctx
+        )
+        skip_rewrite = bool(
+            inv_ctx
+            and det_orig
+            and det_orig.get("matched")
+            and det_orig.get("requires_context") is False
+            and DeterministicIntentClassifier().is_followup_reference(request.query)
+        )
+        if active_memory and not skip_rewrite:
             standalone_q = router_engine.rewrite_to_standalone(request.query, active_memory)
 
-        intent_profile = router_engine.classify_intent(standalone_q)
+        intent_profile = router_engine.classify_intent(standalone_q, investigation_context=inv_ctx)
         target_engine = intent_profile["engine"]
 
         answer_text = ""
@@ -537,41 +833,132 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
         row_count_log = 0
         graph_payload = None  # ADD THIS LINE
         analytics_payload = None
+        case_records = []
+        lookup_scope = None
 
-        if target_engine in ["factual_lookup", "trend_analysis"]:
+        # ── ENTITY-FIRST: exact case/FIR detection overrides everything ──
+        # A question that names a specific FIR/case must resolve THAT record.
+        # Crime/location words in such questions are verification, never broad
+        # filters. This runs before engine dispatch so a classifier mistake can
+        # never send an exact-ID question to RAG/pattern/broad case search.
+        exact_result = ExactCaseResolver().try_handle(
+            standalone_q, rbac_filter=rbac_sql_filter, auth_ctx=auth_ctx
+        )
+        if exact_result.get("handled"):
+            answer_text = exact_result["answer"]
+            citations_array = exact_result.get("citations", [])
+            row_count_log = exact_result.get("total_count", 0)
+            resolved_query_log = exact_result.get("resolved_query", "")
+            execution_detail = exact_result.get("execution_detail", "")
+            case_records = exact_result.get("cases", [])
+            lookup_scope = exact_result.get("scope")
+            target_engine = "exact_case_lookup"
+            # Keep the exact FIR as investigation context for follow-ups
+            store_exact_case_context(request.session_token, exact_result)
+
+        # ── Multi-engine analysis intents ──
+        # Pattern / MO-similarity / financial / network / trend / forecasting /
+        # next-best-action questions run through the investigation pipeline so
+        # they get deterministic scope resolution, the entity firewall (never a
+        # broad case list), evidence fusion and the structured response. The
+        # session's investigation context is passed so follow-ups ("show the
+        # financial trail", "who is connected to it?") keep their entities.
+        delegated_result = None
+        if not exact_result.get("handled") and target_engine in (
+            "pattern_detection", "narrative_rag", "financial_intelligence",
+            "criminal_network", "case_similarity", "forecasting",
+            "next_best_action", "trend_analysis", "investigation",
+        ):
+            delegated_result = investigation_engine.run_investigation(
+                request_text=standalone_q,
+                rbac_filter=rbac_sql_filter,
+                conversation_history=active_memory,
+                investigation_context=inv_ctx,
+                nl2sql_engine=nl2sql_engine,
+                rag_engine=rag_engine,
+                graph_engine=graph_engine,
+                network_engine=network_engine,
+                pattern_engine=pattern_engine,
+                analytics_engine=analytics_engine,
+                case_explorer_engine=case_explorer_engine,
+            )
+            set_investigation_context(request.session_token, delegated_result,
+                                      request_text=standalone_q)
+            target_engine = delegated_result.get("intent_detected") or target_engine
+            answer_text = delegated_result.get("answer", "")
+            citations_array = delegated_result.get("citations", [])
+            row_count_log = len(citations_array)
+            resolved_query_log = "MULTI_ENGINE_DELEGATED"
+            execution_detail = (
+                "Delegated to multi-engine investigation pipeline: "
+                + ", ".join(
+                    delegated_result.get("investigation", {}).get("plan", {}).get("engines", []) or []
+                )
+            )
+            case_records = delegated_result.get("case_records") or []
+            graph_payload = delegated_result.get("graph_data")
+            analytics_payload = delegated_result.get("analytics_data")
+
+        # ── General dispatch (only reached when no exact case identifier and
+        #    no delegation to the investigation pipeline) ──
+        if delegated_result is None and target_engine in ["factual_lookup", "trend_analysis"]:
             trend_instruction = ""
             if target_engine == "trend_analysis":
                 trend_instruction = " FORCE TREND FORMAT: Group by month. Select exactly two columns: 'month' (e.g. TO_CHAR(cm.CrimeRegisteredDate, 'YYYY-MM')) and 'count'."
-                
-            # Inject the security filter into the SQL generation
-            generated_sql = nl2sql_engine.generate_sql(standalone_q + trend_instruction, rbac_filter=rbac_sql_filter)
-            resolved_query_log = generated_sql
-            execution_result = nl2sql_engine.validate_and_execute(generated_sql, standalone_q)
-            
-            if "error" in execution_result:
-                answer_text = f"I couldn't execute that analysis: {execution_result['error']}"
-            else:
-                rows_payload = execution_result.get("rows", [])
-                row_count_log = len(rows_payload)
-                
-                if target_engine == "trend_analysis":
-                    trend_data = []
-                    for row in rows_payload:
-                        keys = list(row.keys())
-                        if len(keys) >= 2:
-                            trend_data.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
-                    
-                    data_points = len(trend_data)
-                    answer_text = f"I have generated a custom trend visualization spanning {data_points} data points based on your specific criteria."
-                    execution_detail = "Executed temporal NLP-to-SQL aggregation query."
-                    analytics_payload = {"type": "trend", "data": trend_data}
-                else:
-                    answer_text = synthesize_structural_response(standalone_q, rows_payload)
-                    extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
-                    citations_array = [str(c) for c in extracted_citations if c][:5]
-                    execution_detail = f"RBAC applied ({user_role}). Executed Query."
 
-        elif target_engine == "narrative_rag":
+            # ── Deterministic factual case lookup ──
+            # Simple database questions ("details about the last cases registered
+            # in Bengaluru Urban central") are handled WITHOUT the LLM: location
+            # and recency are resolved against real tables, RBAC is enforced as
+            # a mandatory condition, and the case query engine returns the actual
+            # records. NL2SQL remains the fallback for queries this path does not
+            # recognize (e.g. complex aggregations).
+            if target_engine == "factual_lookup":
+                lookup_result = FactualCaseLookup().try_lookup(
+                    standalone_q, rbac_filter=rbac_sql_filter, auth_ctx=auth_ctx
+                )
+                if lookup_result.get("handled"):
+                    answer_text = lookup_result["answer"]
+                    citations_array = lookup_result["citations"]
+                    row_count_log = lookup_result["total_count"]
+                    resolved_query_log = lookup_result["resolved_query"]
+                    execution_detail = lookup_result["execution_detail"]
+                    case_records = lookup_result.get("cases", [])
+                    lookup_scope = lookup_result.get("scope")
+                    target_engine = "case_lookup"  # UI label
+
+            # ── Fallback: LLM-to-SQL (unrecognized factual queries + all trend
+            #    queries) ──
+            if target_engine in ("factual_lookup", "trend_analysis"):
+                # Inject the security filter into the SQL generation
+                generated_sql = nl2sql_engine.generate_sql(standalone_q + trend_instruction, rbac_filter=rbac_sql_filter)
+                resolved_query_log = generated_sql
+                execution_result = nl2sql_engine.validate_and_execute(generated_sql, standalone_q)
+                
+                if "error" in execution_result:
+                    answer_text = f"I couldn't execute that analysis: {execution_result['error']}"
+                else:
+                    rows_payload = execution_result.get("rows", [])
+                    row_count_log = len(rows_payload)
+                    
+                    if target_engine == "trend_analysis":
+                        trend_data = []
+                        for row in rows_payload:
+                            keys = list(row.keys())
+                            if len(keys) >= 2:
+                                trend_data.append({"month": str(row[keys[0]]), "count": int(row[keys[1]])})
+                        
+                        data_points = len(trend_data)
+                        answer_text = f"I have generated a custom trend visualization spanning {data_points} data points based on your specific criteria."
+                        execution_detail = "Executed temporal NLP-to-SQL aggregation query."
+                        analytics_payload = {"type": "trend", "data": trend_data}
+                    else:
+                        answer_text = synthesize_structural_response(standalone_q, rows_payload)
+                        extracted_citations = [r.get("crimeno") or r.get("CrimeNo") for r in rows_payload]
+                        citations_array = [str(c) for c in extracted_citations if c][:5]
+                        execution_detail = f"RBAC applied ({user_role}). Executed Query."
+
+        elif delegated_result is None and target_engine == "narrative_rag":
             # For Milestone 2/3, we pass standard RAG. 
             # Note: You can apply the same RBAC logic to the RAG vector search in the future!
             rag_result = rag_engine.search_and_summarize(standalone_q)
@@ -581,7 +968,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 citations_array = rag_result["citations"]
                 row_count_log = len(citations_array)
                 
-        elif target_engine == "risk_profile":
+        elif delegated_result is None and target_engine == "risk_profile":
             accused_id = router_engine.extract_accused_id(standalone_q)
             if accused_id == 0:
                 answer_text = "Please specify an Accused ID to retrieve their risk profile."
@@ -600,7 +987,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 
 
         # ... (Inside the branching logic) ...
-        elif target_engine == "criminal_network":
+        elif delegated_result is None and target_engine == "criminal_network":
             # 1. Extract the ID from the query
             accused_id = router_engine.extract_accused_id(standalone_q)
 
@@ -629,7 +1016,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 
                     graph_payload = graph_result  # ADD THIS LINE
 
-        elif target_engine == "case_similarity":
+        elif delegated_result is None and target_engine == "case_similarity":
             # 1. Extract the CaseMasterID from the query. Let's reuse extract_accused_id logic or regex it.
             match = re.search(r'\d+', standalone_q)
             target_case_id = int(match.group()) if match else 0
@@ -638,8 +1025,11 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 answer_text = "I need a specific Case ID to find similarities. For example: 'Find cases similar to CaseMasterID 2817'."
                 execution_detail = "Failed to extract integer Case ID from prompt."
             else:
-                from engines.pattern_engine import pattern_engine
-                similarity_result = pattern_engine.find_similar_cases(target_case_id)
+                # NOTE: aliased so `pattern_engine` stays the module-level
+                # instance — a plain `import pattern_engine` here would shadow
+                # the global for the whole handler (UnboundLocalError).
+                from engines.pattern_engine import pattern_engine as _pattern_engine
+                similarity_result = _pattern_engine.find_similar_cases(target_case_id)
                 if "error" in similarity_result:
                     answer_text = f"Similarity engine failed: {similarity_result['error']}"
                 else:
@@ -657,7 +1047,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                         
                     execution_detail = f"Executed Tri-Signal pgvector similarity search for Case ID {target_case_id}."
 
-        else:
+        elif delegated_result is None and target_engine not in ("exact_case_lookup",):
             answer_text = "Routed to Analytics endpoint (Milestone 4)."
             execution_detail = "Routing placeholder."
 
@@ -674,6 +1064,19 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
         active_memory.append({"role": "user", "text": request.query})
         active_memory.append({"role": "assistant", "text": answer_text})
 
+        if delegated_result is not None:
+            # Multi-engine delegation returns the full investigation payload
+            # (plan, findings, evidence inventory, routing log, graph/analytics).
+            delegated_result["intent_detected"] = target_engine
+            delegated_result["reasoning_trace"] = {
+                "execution_steps": [
+                    {"step": 1, "action": "Security Check", "detail": _rbac_scope_label(rbac_sql_filter, user_role)},
+                    {"step": 2, "action": "Intent Target", "detail": f"{target_engine} ({intent_profile.get('reasoning', 'classified')})"},
+                    {"step": 3, "action": "Execution", "detail": execution_detail}
+                ]
+            }
+            return delegated_result
+
         return {
             "status": "success",
             "intent_detected": target_engine,
@@ -681,10 +1084,12 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
             "citations": citations_array,
             "graph_data": graph_payload, # ADD THIS LINE
             "analytics_data": analytics_payload, # ADD THIS LINE
+            "case_records": case_records,
+            "lookup_scope": lookup_scope,
             "reasoning_trace": {
                 "execution_steps": [
-                    {"step": 1, "action": f"Security Check ({user_role})", "detail": f"Filter applied: {rbac_sql_filter}"},
-                    {"step": 2, "action": "Intent Target", "detail": intent_profile["reasoning"]},
+                    {"step": 1, "action": "Security Check", "detail": _rbac_scope_label(rbac_sql_filter, user_role)},
+                    {"step": 2, "action": "Intent Target", "detail": f"{target_engine} ({intent_profile.get('reasoning', 'classified')})"},
                     {"step": 3, "action": "Execution", "detail": execution_detail}
                 ]
             }
@@ -748,6 +1153,7 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
             request_text=request.query,
             rbac_filter=rbac_sql_filter,
             conversation_history=extended_history,
+            investigation_context=investigation_context,
             nl2sql_engine=nl2sql_engine,
             rag_engine=rag_engine,
             graph_engine=graph_engine,
@@ -758,7 +1164,7 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
         )
 
         # 4. Store investigation context for multi-turn follow-up
-        set_investigation_context(request.session_token, result)
+        set_investigation_context(request.session_token, result, request_text=request.query)
 
         # 5. Log to conversation history and audit
         active_memory = access_context_memory(request.session_token)
@@ -933,23 +1339,12 @@ class ExportRequest(BaseModel):
 @app.post("/api/chat/export")
 async def export_chat(request: ExportRequest, authorization: Optional[str] = Header(None)):
     """Generates a premium, beautifully styled HTML report of the session transcript for export."""
+    auth_ctx = _require_auth(authorization)  # outside try: 401 must not become 500
     try:
-        officer_name = "Investigator"
-        role = "Analyst"
-        district = "State Database"
-        unit = "HQ"
-        
-        if authorization:
-            try:
-                payload = verify_jwt_token(authorization)
-                profile = get_employee_profile(payload["employee_id"])
-                if "error" not in profile:
-                    officer_name = profile.get("name", officer_name)
-                    role = profile.get("role", role)
-                    district = profile.get("district_name", district)
-                    unit = profile.get("unit_name", unit)
-            except Exception:
-                pass
+        officer_name = auth_ctx.get("name") or "Investigator"
+        role = auth_ctx.get("role") or "Analyst"
+        district = auth_ctx.get("district_name") or "State Database"
+        unit = auth_ctx.get("unit_name") or "HQ"
 
         # Build the HTML template
         html_content = f"""<!DOCTYPE html>
@@ -1196,21 +1591,29 @@ class SarvamTranslateRequest(BaseModel):
 @app.post("/api/sarvam/stt")
 async def sarvam_speech_to_text(
     file: UploadFile = File(...),
-    language_code: str = Form("kn-IN")
+    language_code: str = Form("kn-IN"),
+    authorization: Optional[str] = Header(None),
 ):
     """Converts uploaded audio file to text using Sarvam AI STT."""
+    _require_auth(authorization)
     try:
         audio_bytes = await file.read()
         res = sarvam_engine.speech_to_text(audio_bytes=audio_bytes, language_code=language_code)
         if "error" in res:
             raise HTTPException(status_code=500, detail=res["error"])
         return res
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sarvam STT failed: {str(e)}")
 
 @app.post("/api/sarvam/translate")
-async def sarvam_translate(req: SarvamTranslateRequest):
+async def sarvam_translate(
+    req: SarvamTranslateRequest,
+    authorization: Optional[str] = Header(None),
+):
     """Translates text between Kannada and English (or other Indian languages)."""
+    _require_auth(authorization)
     try:
         res = sarvam_engine.translate(
             text=req.text,
@@ -1220,6 +1623,8 @@ async def sarvam_translate(req: SarvamTranslateRequest):
         if "error" in res:
             raise HTTPException(status_code=500, detail=res["error"])
         return res
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sarvam Translate failed: {str(e)}")
 
@@ -1237,16 +1642,33 @@ class FinancialAnalysisRequest(BaseModel):
 @app.post("/api/financial/analyze")
 async def analyze_financial(
     request: FinancialAnalysisRequest,
-    token_data: dict = Depends(verify_jwt_token)
+    authorization: Optional[str] = Header(None),
 ):
-    """Analyzes financial relationships between accused persons, accounts, and transactions."""
-    auth_context = get_employee_profile(token_data)
+    """Analyzes financial relationships between accused persons, accounts, and transactions.
+
+    Jurisdiction enforcement: Investigator → accounts limited to accused with
+    cases at their own station; Supervisor → own district. State-wide roles
+    (Analyst/Policymaker) may analyse any entity they pass; an unscoped
+    request is their (state-wide) analytic surface, matching the other
+    dashboards — restricted roles NEVER receive an unbounded account dump.
+    """
+    auth_ctx = _require_auth(authorization)
+    jurisdiction_unit_id = None
+    jurisdiction_district_id = None
+    if auth_ctx["role"] == "Investigator":
+        jurisdiction_unit_id = auth_ctx.get("unit_id")
+    elif auth_ctx["role"] == "Supervisor":
+        jurisdiction_district_id = auth_ctx.get("district_id")
+    elif not _is_statewide_role(auth_ctx["role"]):
+        raise HTTPException(status_code=403, detail="Insufficient permissions for financial analysis.")
     try:
         result = financial_intelligence_engine.analyze_financial_relationships(
             accused_ids=request.accused_ids,
             case_ids=request.case_ids,
             date_from=request.date_from,
             date_to=request.date_to,
+            jurisdiction_unit_id=jurisdiction_unit_id,
+            jurisdiction_district_id=jurisdiction_district_id,
         )
 
         # Generate financial leads
@@ -1261,11 +1683,13 @@ async def analyze_financial(
             from engines.audit import AuditLogger
             logger = AuditLogger()
             logger.log(
-                user_id=auth_context.get("employee_id"),
+                user_id=auth_ctx.get("employee_id"),
                 action="financial_analysis",
                 details={
                     "accused_ids": request.accused_ids,
                     "case_ids": request.case_ids,
+                    "jurisdiction_unit_id": jurisdiction_unit_id,
+                    "jurisdiction_district_id": jurisdiction_district_id,
                     "total_accounts": result["summary"]["total_accounts"],
                     "total_transactions": result["summary"]["total_transactions"],
                     "leads_generated": len(result["leads"]),
@@ -1281,9 +1705,17 @@ async def analyze_financial(
 @app.get("/api/financial/account/{account_id}")
 async def get_account_detail(
     account_id: int,
-    token_data: dict = Depends(verify_jwt_token)
+    authorization: Optional[str] = Header(None),
 ):
-    """Returns detailed information about a specific suspect account."""
+    """Returns detailed information about a specific suspect account.
+
+    Jurisdiction-bound roles only see accounts whose accused is linked to at
+    least one case inside their own station/district.
+    """
+    auth_ctx = _require_auth(authorization)
+    role = auth_ctx["role"]
+    guard_unit = auth_ctx.get("unit_id") if role == "Investigator" else None
+    guard_district = auth_ctx.get("district_id") if role == "Supervisor" else None
     try:
         import psycopg2
         conn = psycopg2.connect(os.getenv('NEON_DATABASE_URL'))
@@ -1300,6 +1732,16 @@ async def get_account_detail(
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Account not found")
+        # Row-level RBAC: jurisdiction-bound roles may only open accounts whose
+        # accused is linked to a case inside their own station/district (the
+        # same rule the analyze engine applies). State-wide roles skip this.
+        if (guard_unit or guard_district) and not (
+            row[4] and network_engine.accused_in_scope(
+                row[4], unit_id=guard_unit, district_id=guard_district
+            )
+        ):
+            conn.close()
+            raise HTTPException(status_code=404, detail="Account not found in authorized records")
 
         # Get transactions
         cur.execute("""

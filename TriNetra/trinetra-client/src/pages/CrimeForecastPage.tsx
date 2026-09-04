@@ -463,7 +463,10 @@ export default function CrimeForecastPage() {
           <div className="flex-1 bg-slate-100 rounded-lg overflow-hidden border border-slate-200 relative">
             <ChartLoader isLoading={isLoading}>
               <MapContainer center={KARNATAKA_CENTER} zoom={6} className="w-full h-full absolute inset-0 z-0">
-                <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
+                <TileLayer
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                />
                 {hotspots.filter(h => h.avg_lat && h.avg_lng).map((h) => (
                   <CircleMarker
                     key={h.district_id}

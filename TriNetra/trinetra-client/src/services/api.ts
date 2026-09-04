@@ -83,6 +83,21 @@ export interface ChatResponse {
   citations: string[];
   graph_data: GraphData | null;
   analytics_data: AnalyticsPayload | null;
+  /** Deterministic factual case lookup results (simple database questions). */
+  case_records?: any[];
+  lookup_scope?: {
+    type?: string;
+    /** Scope verification: 'verified' | 'failed' | 'partial' | 'not_specified' */
+    status?: string;
+    location_requested?: string | null;
+    location_resolved?: string | null;
+    period?: string | null;
+    crime?: string | null;
+    /** Case status filter applied (e.g. 'Charge Sheeted'), if any. */
+    case_status?: string | null;
+    records_found?: number;
+    access?: string;
+  } | null;
   reasoning_trace: {
     execution_steps: ReasoningStep[];
   };
@@ -684,22 +699,6 @@ export async function fetchAnalyticsReportingLag(params: AnalyticsSearchParams):
   return response.json();
 }
 
-export interface AnalyticsFinancialResponse {
-  status: string;
-  transactions: { month: string; amount: number; count: number }[];
-  banks: { name: string; accounts: number }[];
-}
-
-export async function fetchAnalyticsFinancial(params: AnalyticsSearchParams): Promise<AnalyticsFinancialResponse> {
-  const queryParts: string[] = [];
-  if (params.district_id) queryParts.push(`district_id=${params.district_id}`);
-  if (params.time_window) queryParts.push(`time_window=${encodeURIComponent(params.time_window)}`);
-  const qs = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
-  const response = await fetch(`${API_BASE}/api/analytics/financial${qs}`, { headers: authHeaders() });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
 export interface AnalyticsDemographicsResponse {
   status: string;
   victims: { age_band: string; gender: string; count: number }[];
@@ -762,18 +761,92 @@ export async function fetchOffendersList(
   return response.json();
 }
 
-export interface PreventionAlert {
-  id: number;
+// ── Prevention Alerts (evidence-first, jurisdiction-scoped) ──
+
+export type PreventionScopeType = 'state' | 'district' | 'station';
+export type AlertSeverity = 'HIGH' | 'MEDIUM' | 'LOW';
+export type PreventionAlertType =
+  | 'rising_activity'
+  | 'geographic_cluster'
+  | 'repeated_modus_operandi'
+  | 'forecast_elevation';
+
+export interface PreventionJurisdiction {
+  role: string;
+  scope: PreventionScopeType;
+  district_id: number | null;
+  district_name: string | null;
+  unit_id: number | null;
+  unit_name?: string | null;
+  label: string;
+  scope_note: string;
+}
+
+export interface PreventionAnalysis {
+  as_of_date?: string;
+  data_recency_note?: string;
+  recent_window?: string;
+  comparison_window?: string;
+  mo_lookback_window?: string;
+  cases_reviewed: number;
+  recent_cases?: number;
+  comparison_cases?: number;
+  crime_categories_reviewed?: number;
+  stations_reviewed?: number;
+  insufficient_history?: boolean;
+  history_note?: string;
+  forecast_note?: string | null;
+}
+
+export interface PreventionSupportingCase {
+  case_id: number;
+  crime_no: string;
+  crime_registered_date: string | null;
+  police_station: string;
   district: string;
-  category: string;
-  reason: string;
-  severity: 'high' | 'medium';
-  data: { v: number }[];
+  brief_facts: string | null;
+}
+
+export interface PreventionAlertEvidence {
+  signal: string;
+  label: string;
+  description: string;
+  value: string;
+}
+
+export interface PreventionAlert {
+  alert_id: string;
+  alert_type: PreventionAlertType;
+  title: string;
+  severity: AlertSeverity;
+  crime_category: string | null;
+  crime_group: string | null;
+  location: string;
+  time_window: { recent: string; comparison?: string; forecast?: string };
+  summary: string;
+  evidence: PreventionAlertEvidence[];
+  supporting_case_count: number;
+  supporting_cases: PreventionSupportingCase[];
+  trend_change: { label: string; recent: number; comparison: number; pct: number | null };
+  source_engines: string[];
+  confidence: string;
+  mo_tags: string[];
+  stations_affected: string[];
+  score: {
+    total: number;
+    level: AlertSeverity;
+    confidence: string;
+    components: Record<string, { rule: string; points: number }>;
+  };
+  recommended_actions: string[];
 }
 
 export interface PreventionAlertsResponse {
   status: string;
+  jurisdiction: PreventionJurisdiction;
+  analysis: PreventionAnalysis;
   alerts: PreventionAlert[];
+  message?: string | null;
 }
 
 export async function fetchPreventionAlerts(districtId?: number): Promise<PreventionAlertsResponse> {
@@ -988,6 +1061,60 @@ export function isInvestigationRequest(query: string): boolean {
     /\bfinancial.*trail/i,
     /\bmoney.*trail/i,
     /\b关联/i,
+    // ── Follow-up / investigation-scoped routing ──
+    // Follow-ups that reference the previous investigation ("which ones",
+    // "these suspects") must reach /api/investigate so the backend can
+    // resolve them against the stored investigation context.
+    /\bwhich ones?\b/i,
+    /\bthese (suspects|accused|offenders|cases|people)\b/i,
+    /\bthose (suspects|accused|offenders|cases|people)\b/i,
+    /\bany of (these|those|them)\b/i,
+    /\b(financial|money).*(connect|link|relationship)/i,
+    /\b(connect|link).*(financially|financial|money)/i,
+    /\bare.*(suspects|accused).*(connected|linked)/i,
+    /\b(connected|linked).*(suspects|accused|cases)/i,
+    /\bmastermind|ringleader|organized|syndicate/i,
+    /\brepeat (offender|offending|behaviour|behavior)/i,
+    /\bsimilar (cases|firs?|crimes)/i,
+    /\bsame (modus operandi|mo|pattern)/i,
+    /\bwho (else|all) is (connected|linked|involved)/i,
+    // ── MO / narrative similarity ("similar modus operandi to a break-in",
+    // "similar method", "cases like this") must reach the multi-engine
+    // pipeline — never the factual lookup route.
+    /\bsimilar (modus operandi|mo|method|pattern|narrative|incidents?|offence|technique|approach)/i,
+    /\bsame (method|modus operandi|mo|technique)/i,
+    /\b(cases?|incidents?) (like this|with the same method|with a similar)/i,
+    /\bcomparable cases?/i,
+    // ── Pattern analysis ("recurring pattern", "common MO", "crime pattern",
+    //    "cluster") — must never land on the trend/factual chat route.
+    /\b(recurring|repeated|repeating|emerging|common|crime)\b[^\n]{0,40}\b(pattern|patterns|modus operandi|mo)\b/i,
+    /\b(pattern|patterns|modus operandi|mo)\b[^\n]{0,40}\b(recurring|repeated|repeating|emerging|common)\b/i,
+    /\bclusters? of|clustering\b/i,
+    /\bfollowing a pattern|follows? a pattern/i,
+    /\bconnected by (method|modus operandi|mo)\b/i,
+    // ── Trend analysis with time-series language — analysis, not a listing.
+    /\btrend(s|ing)?\b/i,
+    /\b(increas|decreas|rise|fall|spike|drop|surge|decline|grow(ing|th)?)\b[^\n]{0,30}\b(crime|theft|burglary|cases|incidents)\b/i,
+    /\bover (the )?last \d+ months?|monthly trend|yearly trend|frequency by month|time[- ]series/i,
+    /\bhow has .{0,40} changed/i,
+    // ── Financial / money / accounts / transactions
+    /\b(financial|money|bank accounts?|accounts? associated|transactions?|money trail|funded|financially)/i,
+    // ── Network follow-ups ("who is connected to it", "are they linked")
+    /\bwho is connected to (it|this|him|her|them)\b/i,
+    /\bare (they|any of them|these people|those people) (connected|linked|associated|related)\b/i,
+    /\bconnections? between|co[- ]accused|syndicate|crime ring|mastermind|ringleader/i,
+    // ── Risk profiling
+    /\brisk (profile|score|assessment)|reoffend|repeat offender|high[- ]risk/i,
+    // ── Forecasting
+    /\bforecast|predict(ed|ing)? (crime|cases|hotspots)|future hotspots/i,
+    // ── Next best action
+    /\bwhat should (investigators?|we|i|they) (do|focus on|prioritize)|next (best )?(investigative )?steps?|recommended action/i,
+    // ── Entity-first: an exact FIR/case ID (>= 12 digits) paired with an
+    // analysis verb must reach the multi-engine pipeline so the exact case
+    // context is retained ("who is connected to FIR X", "financial links of
+    // case X"). Pure fact questions about an ID stay on the chat route.
+    /\b\d{12,}\b[^\n]*\b(connected|linked|network|relationship|financial|transaction|money|evidence|accused|suspects?|involved|similar|victim|associates?|modus operandi|pattern)\b/i,
+    /\b(connected|linked|network|financial|transactions?|money trail|evidence graph)\b[^\n]*\b\d{12,}\b/i,
   ];
   return investigationPatterns.some(p => p.test(lower));
 }
