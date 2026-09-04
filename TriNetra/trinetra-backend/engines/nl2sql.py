@@ -4,12 +4,18 @@ import json
 import psycopg2
 from groq import Groq
 
+
+def _norm_sql(text: str) -> str:
+    """Whitespace/case-insensitive comparison form for SQL fragments."""
+    return re.sub(r"\s+", "", (text or "").lower())
+
 class NL2SQLEngine:
     def __init__(self):
         # Explicit whitelist configuration parameters
         self.allowed_tables = {
-            "casemaster", "district", "casestatusmaster", 
-            "casecategory", "gravityoffence", "court", "unit"
+            "casemaster", "district", "casestatusmaster",
+            "casecategory", "gravityoffence", "court", "unit",
+            "accused", "crimesubhead", "crimehead", "offenderriskscore",
         }
         self.db_url = os.getenv("NEON_DATABASE_URL")
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None
@@ -17,14 +23,21 @@ class NL2SQLEngine:
     def _get_schema_context(self) -> str:
         return """
         SCHEMA MAP:
-        - CaseMaster: CaseMasterID (INT PK), CrimeNo (VARCHAR), PoliceStationID (INT FK to Unit), CaseStatusID (INT FK to CaseStatusMaster), CrimeRegisteredDate (DATE), BriefFacts (TEXT)
+        - CaseMaster: CaseMasterID (INT PK), CrimeNo (VARCHAR), PoliceStationID (INT FK to Unit), CaseStatusID (INT FK to CaseStatusMaster), CrimeRegisteredDate (DATE), BriefFacts (TEXT), CrimeMajorHeadID (INT FK to CrimeHead), CrimeMinorHeadID (INT FK to CrimeSubHead)
         - Unit: UnitID (INT PK), UnitName (VARCHAR), DistrictID (INT FK to District)
         - District: DistrictID (INT PK), DistrictName (VARCHAR)
         - CaseStatusMaster: CaseStatusID (INT PK), CaseStatusName (VARCHAR) -> e.g., 'Under Investigation', 'Charge Sheeted', 'Closed'
+        - Accused: AccusedMasterID (INT PK), CaseMasterID (INT FK to CaseMaster), AccusedName (VARCHAR), AgeYear (INT)
+        - OffenderRiskScore: AccusedMasterID (INT PK, FK to Accused), RiskScore (NUMERIC 0-100), RepeatOffenderFlag (BOOLEAN)
+        - CrimeSubHead: CrimeSubHeadID (INT PK), CrimeHeadID (INT FK to CrimeHead), CrimeHeadName (VARCHAR) -> e.g., 'Murder', 'Robbery', 'Burglary', 'Motor Vehicle Theft'
+        - CrimeHead: CrimeHeadID (INT PK), CrimeGroupName (VARCHAR)
         
         JOIN INSTRUCTIONS:
         - To filter by District name, query path requires: CaseMaster -> Unit -> District
         - To filter by Case Status value, query path requires: CaseMaster -> CaseStatusMaster
+        - To filter by Crime Sub-Head name, query path requires: CaseMaster -> CrimeSubHead (cm.CrimeMinorHeadID = h.CrimeSubHeadID)
+        - To find the case an accused belongs to: SELECT cm.CaseMasterID, cm.CrimeNo FROM Accused a JOIN CaseMaster cm ON a.CaseMasterID = cm.CaseMasterID WHERE a.AccusedMasterID = <id>
+        - To find an accused risk score: SELECT a.AccusedMasterID, a.AccusedName, ors.RiskScore FROM Accused a JOIN OffenderRiskScore ors ON a.AccusedMasterID = ors.AccusedMasterID WHERE a.AccusedMasterID = <id>
         """
 
     def _get_few_shot_examples(self) -> str:
@@ -70,7 +83,8 @@ class NL2SQLEngine:
         sql = response.choices[0].message.content.strip()
         return sql.replace("```sql", "").replace("```", "").strip()
 
-    def validate_and_execute(self, sql_query: str, user_query: str, retry_count: int = 0) -> dict:
+    def validate_and_execute(self, sql_query: str, user_query: str,
+                             rbac_filter: str = "1=1", retry_count: int = 0) -> dict:
         clean_query = sql_query.strip().lower()
         
         # Guardrail Tier 1: Multi-Statement Detection Block
@@ -82,7 +96,34 @@ class NL2SQLEngine:
         if not clean_query.startswith("select"):
             return {"error": "Security Constraint Violation: Only data read (SELECT) sequences are permitted."}
 
-        # Guardrail Tier 3: Whitelist Boundary Matching Validation
+        # Guardrail Tier 3.5: Row-Level Security presence enforcement.
+        # A restricted scope (Investigator/Supervisor) is only safe if the
+        # generated query literally carries the server-side RBAC condition.
+        # An LLM that omits it must never be executed against the whole state:
+        # regenerate once, then refuse rather than widen.
+        if (rbac_filter or "").strip() not in ("", "1=1"):
+            if _norm_sql(rbac_filter) not in _norm_sql(sql_query):
+                if retry_count < 1:
+                    recompiled_sql = self.generate_sql(
+                        user_query,
+                        rbac_filter=rbac_filter,
+                        error_context=(
+                            "MISSING MANDATORY ROW-LEVEL SECURITY CONDITION "
+                            f"({rbac_filter.strip()}). Include it verbatim in the WHERE clause."
+                        ),
+                    )
+                    return self.validate_and_execute(
+                        recompiled_sql, user_query,
+                        rbac_filter=rbac_filter, retry_count=retry_count + 1,
+                    )
+                return {
+                    "error": (
+                        "Security Constraint Violation: Row-level security condition "
+                        "missing from the generated query."
+                    )
+                }
+
+        # Guardrail Tier 4: Enforce Cap Limits Safeguard
         # Strip EXTRACT(...) functions to prevent 'from cm.date' being parsed as a table 'cm'
         query_for_parsing = re.sub(r'extract\s*\([^)]+from[^)]+\)', '', clean_query)
         table_tokens = re.findall(r'\bfrom\s+([a-zA-Z_0-9]+)|\bjoin\s+([a-zA-Z_0-9]+)', query_for_parsing)
@@ -117,9 +158,17 @@ class NL2SQLEngine:
                 "executed_sql": sql_query
             }
         except Exception as db_exception:
-            # Self-Correction Step Trigger Logic Condition Check
-            if retry_count < 1: 
-                recompiled_sql = self.generate_sql(user_query, error_context=str(db_exception))
-                return self.validate_and_execute(recompiled_sql, user_query, retry_count=retry_count+1)
-            
+            # Self-Correction Step Trigger Logic Condition Check.
+            # The RBAC filter is carried into the retry so a scoped query can
+            # never be regenerated as a state-wide fallback.
+            if retry_count < 1:
+                recompiled_sql = self.generate_sql(
+                    user_query, rbac_filter=rbac_filter,
+                    error_context=str(db_exception),
+                )
+                return self.validate_and_execute(
+                    recompiled_sql, user_query,
+                    rbac_filter=rbac_filter, retry_count=retry_count + 1,
+                )
+
             return {"error": f"Database Runtime Exception: {str(db_exception)}", "executed_sql": sql_query}
