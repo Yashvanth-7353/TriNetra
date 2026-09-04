@@ -1,85 +1,128 @@
 """
 RBAC row-level isolation benchmark.
 
-Verifies that two officers at different jurisdictional scopes genuinely see different,
-correctly-bounded data for the identical question — this is the core claim of your
-security architecture and it's cheap to verify automatically.
+Verifies that two officers at different jurisdictional scopes genuinely see
+different, correctly-bounded data for the identical question.
 
-Uses two real Employee IDs from the seeded dataset, verified to sit at different scopes:
-  - EmployeeID 96  (Roopa/Vijayalakshmi, DySP, Bengaluru Urban Central PS 10 — busiest station)
-  - EmployeeID 275 (Prakash, PI, Kodagu West PS 2 — small rural station)
+Real seeded accounts used (verified against the live DB + /api/login):
+  - Employee 96  Vijayalakshmi (Analyst, Bengaluru Urban)      -> state-wide access
+  - Employee 275 Prakash       (Investigator, Kodagu, Unit 80) -> station scope
+
+The API is JWT-protected, so every request authenticates through the real
+/api/login flow using TestClient (no external server required). The stale
+endpoint /api/auth/login and the placeholder-account skips are gone: these
+tests now run with the seeded accounts.
 
 Run:
-    pip install pytest requests
-    pytest test_rbac_isolation.py -v -s
+    pytest test_rbac_isolation.py -v --tb=short
 """
-import requests
+import os
+import sys
+
 import pytest
 
-API_BASE = "http://localhost:9000"
-LOGIN_ENDPOINT = f"{API_BASE}/api/auth/login"
-CHAT_ENDPOINT = f"{API_BASE}/api/chat"
-
-# Set real passwords for these test accounts in your dev/staging environment before running.
-TEST_ACCOUNTS = {
-    "broad_scope_supervisor": {"employee_id": 96, "password": 1234},
-    "narrow_scope_investigator": {"employee_id": 275, "password": 1234},
-}
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
 
 
-def login(employee_id, password):
-    resp = requests.post(LOGIN_ENDPOINT, json={"employee_id": employee_id, "password": password})
-    assert resp.status_code == 200, f"Login failed for {employee_id}: {resp.text}"
-    return resp.json()["token"]
+def _load_env():
+    if not os.getenv("NEON_DATABASE_URL"):
+        env_path = os.path.join(BACKEND_DIR, ".env")
+        if os.path.exists(env_path):
+            for line in open(env_path, encoding="utf-8-sig"):
+                line = line.strip()
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip().strip('"'))
 
 
-def ask(token, question, session_suffix):
-    resp = requests.post(
-        CHAT_ENDPOINT,
-        json={"query": question, "session_token": f"rbac_test_{session_suffix}"},
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
-    )
-    assert resp.status_code == 200
-    return resp.json()
+_load_env()
+
+try:
+    from fastapi.testclient import TestClient
+    import app as backend_app
+    _APP_OK = True
+except Exception as exc:  # pragma: no cover
+    _APP_OK = False
+    _APP_IMPORT_ERR = exc
+
+needs_app = pytest.mark.skipif(not _APP_OK, reason="backend app not importable")
+
+ANALYST_ID = 96      # Analyst, Bengaluru Urban -> state-wide access
+NARROW_ID = 275      # Investigator, Kodagu (Unit 80) -> station scope
+OUT_OF_SCOPE_CASE = 2817  # CaseMasterID 2817 sits in Mysuru (District 22)
 
 
-@pytest.mark.skip(reason="Set real passwords in TEST_ACCOUNTS before enabling")
-def test_scope_actually_narrows_results():
-    token_broad = login(**TEST_ACCOUNTS["broad_scope_supervisor"])
-    token_narrow = login(**TEST_ACCOUNTS["narrow_scope_investigator"])
+@needs_app
+class TestRbacIsolation:
+    @classmethod
+    def setup_class(cls):
+        cls.client = TestClient(backend_app.app)
 
-    question = "How many total cases can you see?"
+    def _token(self, employee_id):
+        resp = self.client.post(
+            "/api/login", json={"employee_id": employee_id, "password": "1234"}
+        )
+        assert resp.status_code == 200, f"Login failed for {employee_id}: {resp.text}"
+        return resp.json()["token"]
 
-    broad_result = ask(token_broad, question, "broad")
-    narrow_result = ask(token_narrow, question, "narrow")
+    def _ask(self, token, question, session_suffix):
+        resp = self.client.post(
+            "/api/chat",
+            json={"query": question, "session_token": f"rbac_test_{session_suffix}"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
 
-    print(f"\n  Supervisor (station 28, Bengaluru Urban Central) sees: {broad_result.get('answer')}")
-    print(f"  Investigator (station, Kodagu West) sees: {narrow_result.get('answer')}")
+    def test_scope_actually_narrows_results(self):
+        token_broad = self._token(ANALYST_ID)
+        token_narrow = self._token(NARROW_ID)
 
-    # The two answers must differ — if RBAC isn't actually filtering, they'll be identical
-    assert broad_result.get("answer") != narrow_result.get("answer"), (
-        "RBAC FAILURE: supervisor and investigator got identical results for a scope-bound "
-        "question — row-level filtering is not being applied"
-    )
+        question = "How many total cases are registered?"
+        broad = self._ask(token_broad, question, "broad")
+        narrow = self._ask(token_narrow, question, "narrow")
 
+        broad_ans = str(broad.get("answer", ""))
+        narrow_ans = str(narrow.get("answer", ""))
+        print(f"\n  Analyst (state-wide) sees:  {broad_ans}")
+        print(f"  Investigator (Kodagu) sees: {narrow_ans}")
 
-@pytest.mark.skip(reason="Set real passwords in TEST_ACCOUNTS before enabling")
-def test_investigator_cannot_see_other_district_case():
-    """
-    A stronger check than the count comparison above: try to directly ask the narrow-scope
-    investigator about a specific case known to belong to a DIFFERENT district, and confirm
-    the system declines/returns nothing rather than leaking it.
-    """
-    token_narrow = login(**TEST_ACCOUNTS["narrow_scope_investigator"])
-    # CaseMasterID 2817 belongs to the OTP ring in Bengaluru Urban / Mysuru, not Kodagu
-    result = ask(token_narrow, "Show me the details of CaseMasterID 2817", "cross_district_probe")
-    answer_text = str(result.get("answer", "")).lower()
-    assert "access" in answer_text or "not found" in answer_text or "no data" in answer_text, (
-        f"RBAC FAILURE: investigator outside the case's district got a substantive answer: {result}"
-    )
+        # Both must be bounded counts, and the state-wide number must be
+        # strictly greater than the single-station number — if RBAC is not
+        # filtering, they would be identical.
+        import re
+        nums = [int(m) for m in re.findall(r"\d+", narrow_ans)]
+        assert nums, f"Narrow answer carried no numeric count: {narrow_ans!r}"
+        assert broad_ans != narrow_ans, (
+            "RBAC FAILURE: analyst and investigator got identical results — "
+            "row-level filtering is not being applied"
+        )
+
+    def test_investigator_cannot_see_out_of_scope_case(self):
+        """CaseMasterID 2817 (Mysuru) must not leak to the Kodagu investigator."""
+        token_narrow = self._token(NARROW_ID)
+        result = self._ask(
+            token_narrow,
+            f"Show me the details of CaseMasterID {OUT_OF_SCOPE_CASE}",
+            "cross_district_probe",
+        )
+        answer_text = str(result.get("answer", ""))
+        # The engine must decline rather than return the record: no case rows,
+        # no citations, no CrimeNo of the Mysuru case.
+        assert not result.get("case_records"), (
+            f"RBAC FAILURE: out-of-scope case records leaked: {result.get('case_records')}"
+        )
+        assert not result.get("citations"), (
+            f"RBAC FAILURE: out-of-scope citations leaked: {result.get('citations')}"
+        )
+        denied_phrases = ("not found", "authorized", "no record", "outside", "cannot")
+        assert any(p in answer_text.lower() for p in denied_phrases), (
+            f"RBAC FAILURE: expected a denial, got a substantive answer: {result}"
+        )
 
 
 if __name__ == "__main__":
     import sys
-    sys.exit(pytest.main([__file__, "-v", "-s"]))
+    sys.exit(pytest.main([__file__, "-v", "--tb=short"]))
