@@ -1,5 +1,32 @@
 import os
+import re
+
 import psycopg2
+
+
+def parse_rbac_scope(rbac_filter: str):
+    """Parses a server-generated RBAC SQL fragment into structured jurisdiction.
+
+    Mirrors build_rbac_filter: an Investigator filter pins one police station
+    (``cm.PoliceStationID = <unit_id>``), a Supervisor filter pins one district
+    (``u.DistrictID = <district_id>``), and Analyst/Policymaker filters are the
+    literal ``1=1`` (no restriction). Used by engines that need a structured
+    scope (e.g. accused-in-scope checks) instead of a raw SQL condition.
+
+    Returns (unit_id, district_id): exactly one may be set for restricted
+    roles; both None for state-wide access.
+    """
+    f = re.sub(r"\s+", " ", (rbac_filter or "")).strip()
+    if not f or f == "1=1":
+        return None, None
+    m = re.search(r"cm\.PoliceStationID\s*=\s*(\d+)", f, re.IGNORECASE)
+    if m:
+        return int(m.group(1)), None
+    m = re.search(r"u\.DistrictID\s*=\s*(\d+)", f, re.IGNORECASE)
+    if m:
+        return None, int(m.group(1))
+    return None, None
+
 
 class SecurityContext:
     def __init__(self):

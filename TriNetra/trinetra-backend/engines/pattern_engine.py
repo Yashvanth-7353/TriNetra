@@ -8,14 +8,26 @@ class PatternEngine:
     def __init__(self):
         self.db_url = os.getenv("NEON_DATABASE_URL")
 
-    def get_emerging_patterns(self):
-        """Generates dynamic clusters by finding MO tags with recent surges."""
+    def get_emerging_patterns(self, rbac_filter: str = None):
+        """Generates dynamic clusters by finding MO tags with recent surges.
+
+        rbac_filter: optional server-generated row-level security condition
+            (e.g. Investigator -> one station, Supervisor -> one district). When
+            present it is ANDed into BOTH the cluster aggregation and the
+            per-cluster case listing, so restricted roles only ever see clusters
+            and supporting FIRs inside their own jurisdiction.
+        """
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
-            
+
+            scope_cond = ""
+            if rbac_filter and rbac_filter.strip() not in ("", "1=1") \
+                    and ";" not in rbac_filter and "--" not in rbac_filter:
+                scope_cond = f" AND ({rbac_filter})"
+
             # Find the top 15 surging MO tags in the last 90 days
-            cur.execute("""
+            cur.execute(f"""
                 SELECT 
                     mo.MOTagID, 
                     t.MOTagName, 
@@ -25,7 +37,8 @@ class PatternEngine:
                 FROM ModusOperandi mo
                 JOIN MOTagMaster t ON mo.MOTagID = t.MOTagID
                 JOIN CaseMaster cm ON mo.CaseMasterID = cm.CaseMasterID
-                WHERE cm.CrimeRegisteredDate >= NOW() - INTERVAL '90 days'
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE cm.CrimeRegisteredDate >= NOW() - INTERVAL '90 days'{scope_cond}
                 GROUP BY mo.MOTagID, t.MOTagName
                 HAVING COUNT(mo.CaseMasterID) >= 2
                 ORDER BY case_count DESC
@@ -42,7 +55,7 @@ class PatternEngine:
                 end_date = r[4]
                 
                 # Get the actual cases for this cluster
-                cur.execute("""
+                cur.execute(f"""
                     SELECT 
                         cm.CaseMasterID, 
                         cm.CrimeNo, 
@@ -56,7 +69,7 @@ class PatternEngine:
                     JOIN ModusOperandi mo ON cm.CaseMasterID = mo.CaseMasterID
                     JOIN Unit u ON cm.PoliceStationID = u.UnitID
                     JOIN District d ON u.DistrictID = d.DistrictID
-                    WHERE mo.MOTagID = %s AND cm.CrimeRegisteredDate >= NOW() - INTERVAL '90 days'
+                    WHERE mo.MOTagID = %s AND cm.CrimeRegisteredDate >= NOW() - INTERVAL '90 days'{scope_cond}
                     ORDER BY cm.CrimeRegisteredDate DESC
                 """, (mo_tag_id,))
                 cases_raw = cur.fetchall()
@@ -105,7 +118,8 @@ class PatternEngine:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    def get_scoped_patterns(self, crime_head_id=None, district_id=None, time_window=None):
+    def get_scoped_patterns(self, crime_head_id=None, district_id=None, time_window=None,
+                            rbac_filter: str = None):
         """
         Returns emerging MO-based patterns filtered by investigation scope.
         Unlike get_emerging_patterns() which returns ALL patterns,
@@ -115,6 +129,10 @@ class PatternEngine:
             crime_head_id: CrimeHeadID to filter by (e.g. 2 for Property Crimes, or a CrimeSubHeadID for specific type)
             district_id: DistrictID to filter by
             time_window: '3m', '6m', '12m', or None for default 90 days
+            rbac_filter: optional server-generated row-level security condition
+                (Investigator -> station, Supervisor -> district). ANDed into
+                both the cluster aggregation and the case listing so supporting
+                FIRs never escape the caller's jurisdiction.
         """
         try:
             conn = psycopg2.connect(self.db_url)
@@ -143,6 +161,10 @@ class PatternEngine:
             if district_id:
                 conditions.append("u.DistrictID = %s")
                 params.append(district_id)
+
+            if rbac_filter and rbac_filter.strip() not in ("", "1=1") \
+                    and ";" not in rbac_filter and "--" not in rbac_filter:
+                conditions.append(f"({rbac_filter})")
 
             where_clause = " AND ".join(conditions)
 
@@ -190,6 +212,11 @@ class PatternEngine:
                 if crime_head_id:
                     case_conditions.append("(cm.CrimeMajorHeadID = %s OR cm.CrimeMinorHeadID = %s)")
                     case_params.extend([crime_head_id, crime_head_id])
+                if rbac_filter and rbac_filter.strip() not in ("", "1=1") \
+                        and ";" not in rbac_filter and "--" not in rbac_filter:
+                    # Server-generated inline condition (hygiene-checked above);
+                    # NOT a bind parameter.
+                    case_conditions.append(f"({rbac_filter})")
 
                 case_where = " AND ".join(case_conditions)
                 cur.execute(f"""
@@ -267,41 +294,61 @@ class PatternEngine:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    def find_similar_cases(self, case_id, k=10):
+    def find_similar_cases(self, case_id, k=10, rbac_filter: str = None):
+        """
+        Similar-case search anchored on one case.
+
+        rbac_filter: optional server-generated row-level security condition.
+        When present (restricted role) it is applied to the anchor lookup AND
+        to every candidate source (MO overlap, narrative similarity, detail
+        fetch), so a caller can only ever see similar records that also sit
+        inside their own jurisdiction -- similarity search can never become a
+        cross-jurisdiction side channel.
+        """
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
-            
-            # 1. Target Case Details
-            cur.execute("""
-                SELECT latitude, longitude, CrimeRegisteredDate
-                FROM CaseMaster
-                WHERE CaseMasterID = %s
+
+            scope_cond = ""
+            if rbac_filter and rbac_filter.strip() not in ("", "1=1") \
+                    and ";" not in rbac_filter and "--" not in rbac_filter:
+                scope_cond = f" AND ({rbac_filter})"
+            # 1. Target Case Details (RBAC-scoped: out-of-jurisdiction anchors
+            # resolve as "not found" so no similarity result is ever produced)
+            cur.execute(f"""
+                SELECT cm.latitude, cm.longitude, cm.CrimeRegisteredDate
+                FROM CaseMaster cm
+                WHERE cm.CaseMasterID = %s{scope_cond}
             """, (case_id,))
             target = cur.fetchone()
             if not target:
-                return {"status": "error", "error": "Target case not found"}
+                return {"status": "success", "similar_cases": [], "anchor_in_scope": False}
             
             t_lat, t_lng, t_date = target
             
-            # 2. MO Overlap Matches
-            cur.execute("""
+            # 2. MO Overlap Matches (candidate restricted to caller jurisdiction)
+            cur.execute(f"""
                 SELECT mo2.CaseMasterID, COUNT(*) as shared_mo
                 FROM ModusOperandi mo1
                 JOIN ModusOperandi mo2 ON mo1.MOTagID = mo2.MOTagID
-                WHERE mo1.CaseMasterID = %s AND mo2.CaseMasterID != %s
+                JOIN CaseMaster cm ON mo2.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE mo1.CaseMasterID = %s AND mo2.CaseMasterID != %s{scope_cond}
                 GROUP BY mo2.CaseMasterID
                 HAVING COUNT(*) > 0
             """, (case_id, case_id))
             mo_matches = {r[0]: r[1] for r in cur.fetchall()}
             
-            # 3. Narrative Similarity matches (Try pgvector)
+            # 3. Narrative Similarity matches (Try pgvector) -- candidate
+            # embeddings restricted to the caller's jurisdiction as well.
             narrative_matches = {}
             try:
-                cur.execute("""
-                    SELECT e2.CaseMasterID, 1 - (e1.EmbeddingVector <=> e2.EmbeddingVector) as sim
-                    FROM CaseNarrativeEmbedding e1, CaseNarrativeEmbedding e2
-                    WHERE e1.CaseMasterID = %s AND e2.CaseMasterID != %s
+                cur.execute(f"""
+                SELECT e2.CaseMasterID, 1 - (e1.EmbeddingVector <=> e2.EmbeddingVector) as sim
+                FROM CaseNarrativeEmbedding e1, CaseNarrativeEmbedding e2
+                JOIN CaseMaster cm ON e2.CaseMasterID = cm.CaseMasterID
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE e1.CaseMasterID = %s AND e2.CaseMasterID != %s{scope_cond}
                     ORDER BY e1.EmbeddingVector <=> e2.EmbeddingVector LIMIT 50
                 """, (case_id, case_id))
                 narrative_matches = {r[0]: float(r[1]) for r in cur.fetchall()}
@@ -314,12 +361,14 @@ class PatternEngine:
             if not candidate_ids:
                 return {"status": "success", "similar_cases": []}
                 
-            # 4. Fetch details for all candidates to calculate Geo/Time proximity
+            # 4. Fetch details for all candidates (jurisdiction-scoped)
             id_list = tuple(candidate_ids)
             cur.execute(f"""
-                SELECT CaseMasterID, CrimeNo, BriefFacts, latitude, longitude, CrimeRegisteredDate
-                FROM CaseMaster
-                WHERE CaseMasterID IN %s
+                SELECT cm.CaseMasterID, cm.CrimeNo, cm.BriefFacts, cm.latitude,
+                       cm.longitude, cm.CrimeRegisteredDate
+                FROM CaseMaster cm
+                JOIN Unit u ON cm.PoliceStationID = u.UnitID
+                WHERE cm.CaseMasterID IN %s{scope_cond}
             """, (id_list,))
             
             results = []
