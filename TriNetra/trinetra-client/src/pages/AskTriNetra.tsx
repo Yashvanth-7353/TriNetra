@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages } from 'lucide-react';
+import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages, Plus, MessageSquare, Trash2, History } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, fetchNextBestActions, exportChat, transcribeAudio, translateText, type EvidenceEdge, type EvidenceNode, type NextBestActionLead } from '../services/api';
+import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, fetchNextBestActions, exportChat, transcribeAudio, translateText, fetchConversations, createConversation, fetchConversation, deleteConversation, type EvidenceEdge, type EvidenceNode, type NextBestActionLead, type ChatConversation } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 import EvidenceGraph from '../components/EvidenceGraph';
 import EvidencePanel from '../components/EvidencePanel';
@@ -114,6 +114,12 @@ export default function AskTriNetra() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
 
+  // Persistent conversation history (server-side Catalyst Data Store)
+  const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
   // Sarvam AI Audio STT State
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -128,6 +134,80 @@ export default function AskTriNetra() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Load the authenticated employee's persistent conversation history.
+  const loadConversations = async () => {
+    if (!localStorage.getItem('trinetra_token')) return;
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const list = await fetchConversations();
+      setConversations(list);
+    } catch (err: any) {
+      console.warn('Failed to load conversation history:', err);
+      // Persistence tier unavailable (e.g. Catalyst not configured / down):
+      // the chat itself keeps working in stateless mode.
+      setConversations([]);
+      setHistoryError('History unavailable — chat continues without persistence.');
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConversations();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleNewChat = async () => {
+    try {
+      const conversation = await createConversation();
+      setActiveConversationId(conversation.conversation_id);
+      setMessages([]);
+      setHistoryError(null);
+      await loadConversations();
+    } catch (err: any) {
+      console.error('Failed to start a new investigation conversation:', err);
+      // Fall back to stateless chat when persistence is unavailable.
+      setActiveConversationId(null);
+      setMessages([]);
+      alert('History unavailable: ' + (err.message || 'could not create conversation.'));
+    }
+  };
+
+  const handleOpenConversation = async (conversationId: string) => {
+    try {
+      const detail = await fetchConversation(conversationId);
+      setActiveConversationId(conversationId);
+      setMessages(
+        detail.messages.map((m) => ({
+          id: m.message_id || String(Date.now() + Math.random()),
+          sender: m.role === 'user' ? 'user' : 'bot',
+          text: m.content || '',
+          intent_detected: m.intent || undefined,
+        }))
+      );
+      setHistoryError(null);
+    } catch (err: any) {
+      console.error('Failed to open conversation:', err);
+      alert('Could not open conversation: ' + (err.message || 'unknown error'));
+    }
+  };
+
+  const handleDeleteConversation = async (conversationId: string) => {
+    if (!window.confirm('Delete this investigation history?')) return;
+    try {
+      await deleteConversation(conversationId);
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(null);
+        setMessages([]);
+      }
+      await loadConversations();
+    } catch (err: any) {
+      console.error('Failed to delete conversation:', err);
+      alert('Could not delete conversation: ' + (err.message || 'unknown error'));
+    }
+  };
 
   const handleExport = async () => {
     if (messages.length === 0) return;
@@ -248,10 +328,16 @@ export default function AskTriNetra() {
       let data: any;
       if (isInvestigation) {
         setStatusMessage('TriNetra: Running multi-engine investigation...');
-        data = await sendInvestigationQuery(queryForBackend);
+        data = await sendInvestigationQuery(
+          queryForBackend,
+          undefined,
+          activeConversationId || undefined
+        );
       } else {
         setStatusMessage('TriNetra Engine: Processing query...');
-        data = await sendChatQuery(queryForBackend);
+        data = await sendChatQuery(queryForBackend, {
+          conversation_id: activeConversationId || undefined,
+        });
       }
 
       let answerText = data.answer || "I'm sorry, I couldn't process that.";
@@ -303,6 +389,10 @@ export default function AskTriNetra() {
       };
 
       setMessages((prev) => [...prev, botMessage]);
+      // Conversation title/metadata may have changed server-side.
+      if (activeConversationId) {
+        loadConversations();
+      }
     } catch (error: any) {
       console.error('Error fetching chat response:', error);
       setMessages((prev) => [
@@ -321,8 +411,95 @@ export default function AskTriNetra() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-slate-50">
-      
+    <div className="flex h-full bg-slate-50 overflow-hidden">
+      {/* ── Persistent investigation history sidebar ── */}
+      <aside className="hidden md:flex flex-col w-64 shrink-0 bg-white border-r border-slate-200">
+        <div className="p-3 border-b border-slate-200">
+          <button
+            onClick={handleNewChat}
+            className="w-full flex items-center justify-center gap-2 text-sm font-semibold text-white bg-primary-900 hover:bg-primary-800 rounded-lg py-2 transition-colors shadow-sm"
+          >
+            <Plus className="w-4 h-4" />
+            New Investigation
+          </button>
+        </div>
+        <div className="px-4 pt-3 pb-1 flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <History className="w-3.5 h-3.5" />
+          Conversation History
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 pb-2">
+          {isHistoryLoading && (
+            <div className="flex items-center gap-2 px-2 py-3 text-xs text-slate-400">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Loading history...
+            </div>
+          )}
+          {historyError && (
+            <div className="px-2 py-2 text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md mx-1">
+              {historyError}
+            </div>
+          )}
+          {!isHistoryLoading && !historyError && conversations.length === 0 && (
+            <div className="px-3 py-4 text-xs text-slate-400 leading-relaxed">
+              No saved investigations yet. Start a new conversation and it will
+              appear here so you can reopen it later.
+            </div>
+          )}
+          {conversations.map((conversation) => (
+            <div
+              key={conversation.conversation_id}
+              role="button"
+              tabIndex={0}
+              onClick={() => handleOpenConversation(conversation.conversation_id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleOpenConversation(conversation.conversation_id);
+              }}
+              className={cn(
+                "group flex items-start gap-2 w-full text-left px-2 py-2 rounded-lg mb-0.5 cursor-pointer transition-colors",
+                activeConversationId === conversation.conversation_id
+                  ? "bg-primary-50 border border-primary-200"
+                  : "hover:bg-slate-100 border border-transparent"
+              )}
+            >
+              <MessageSquare
+                className={cn(
+                  "w-4 h-4 mt-0.5 shrink-0",
+                  activeConversationId === conversation.conversation_id
+                    ? "text-primary-700"
+                    : "text-slate-400"
+                )}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-medium text-slate-700 truncate">
+                  {conversation.title || 'New Investigation'}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                  {conversation.last_intent || '—'}
+                  {conversation.last_activity_at
+                    ? ' · ' + new Date(conversation.last_activity_at).toLocaleString()
+                    : ''}
+                </div>
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDeleteConversation(conversation.conversation_id);
+                }}
+                title="Delete conversation"
+                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-600 p-1 rounded transition-opacity shrink-0"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="p-3 border-t border-slate-200 text-[10px] text-slate-400 leading-snug">
+          History is stored per employee and persists across sessions.
+        </div>
+      </aside>
+
+      {/* Chat column */}
+      <div className="flex flex-col flex-1 min-w-0 h-full">
       {/* Top Bar */}
       <div className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0 shadow-sm">
         <div className="flex items-center gap-3">
@@ -639,7 +816,7 @@ export default function AskTriNetra() {
           <p className="text-[10px] text-slate-400">Powered by Sarvam AI Speech-to-Text & Kannada Neural Translation | TriNetra Core Node</p>
         </div>
       </div>
-
+      </div>{/* /chat column */}
     </div>
   );
 }

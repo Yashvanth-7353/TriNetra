@@ -32,6 +32,91 @@ function authHeaders(): Record<string, string> {
 export interface ChatRequest {
   query: string;
   session_token?: string;
+  /** Persistent conversation id (Catalyst-backed chat history). When present
+   * the backend verifies ownership via JWT and persists message + context. */
+  conversation_id?: string;
+}
+
+// ── Persistent chat conversations (server-side Catalyst Data Store) ──
+
+export interface ChatConversation {
+  conversation_id: string;
+  title: string;
+  status: string;
+  last_case_id: string | null;
+  last_intent: string | null;
+  last_activity_at: string | null;
+}
+
+export interface ConversationMessage {
+  message_id: string;
+  conversation_id: string;
+  employee_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  intent: string | null;
+  engine: string | null;
+  created_at: string;
+}
+
+export interface ConversationDetail {
+  status: string;
+  conversation: ChatConversation;
+  messages: ConversationMessage[];
+  investigation_context: Record<string, unknown> | null;
+}
+
+/** Lists the conversations owned by the authenticated employee. */
+export async function fetchConversations(): Promise<ChatConversation[]> {
+  const response = await fetch(`${API_BASE}/api/chat/conversations`, {
+    method: 'GET',
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Conversation list failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  return data.conversations || [];
+}
+
+/** Creates a new empty conversation for the authenticated employee. */
+export async function createConversation(): Promise<ChatConversation> {
+  const response = await fetch(`${API_BASE}/api/chat/conversations`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Create conversation failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  return data.conversation;
+}
+
+/** Loads a conversation (messages + context). Ownership is verified server-side. */
+export async function fetchConversation(conversationId: string): Promise<ConversationDetail> {
+  const response = await fetch(`${API_BASE}/api/chat/conversations/${encodeURIComponent(conversationId)}`, {
+    method: 'GET',
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Conversation load failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+/** Deletes a conversation owned by the authenticated employee. */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/chat/conversations/${encodeURIComponent(conversationId)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Delete conversation failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
 }
 
 export interface ReasoningStep {
@@ -1009,14 +1094,18 @@ export interface InvestigationResponse {
  */
 export async function sendInvestigationQuery(
   query: string,
-  sessionToken?: string
+  sessionToken?: string,
+  conversationId?: string
 ): Promise<InvestigationResponse> {
   const profile = getStoredProfile();
 
-  const body = {
+  const body: Record<string, string> = {
     query,
     session_token: sessionToken || `session_${profile?.employee_id || 'anon'}`,
   };
+  if (conversationId) {
+    body.conversation_id = conversationId;
+  }
 
   const response = await fetch(`${API_BASE}/api/investigate`, {
     method: 'POST',
