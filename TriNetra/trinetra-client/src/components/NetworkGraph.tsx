@@ -284,8 +284,10 @@ export default function NetworkGraph({
     });
   }, [graphEdges]);
 
-  const [flowNodes, , onNodesChange] = useNodesState(rfNodes);
-  const [flowEdges, , onEdgesChange] = useEdgesState(rfEdges);
+  // Controlled-state handlers: rfNodes/rfEdges come from useMemo; only the
+  // change handlers (and their internal state) are needed for interactivity.
+  const [, , onNodesChange] = useNodesState(rfNodes);
+  const [, , onEdgesChange] = useEdgesState(rfEdges);
 
   const handleNodeClick: NodeMouseHandler = useCallback(
     (_, node) => {

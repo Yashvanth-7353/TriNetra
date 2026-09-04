@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { User, Shield, Globe, Database, Activity } from 'lucide-react';
+import { useState } from 'react';
+import { User, Shield, Globe } from 'lucide-react';
 
 const auditLogData = [
   { time: '2026-07-15 10:42', role: 'Investigator', question: 'Show me the network for accused 245', engine: 'Graph Analysis', rows: 12 },

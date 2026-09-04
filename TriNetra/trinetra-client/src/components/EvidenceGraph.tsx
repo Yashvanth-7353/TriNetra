@@ -1,5 +1,5 @@
 import { useMemo, useCallback } from 'react';
-import ReactFlow, { Background, Controls, useNodesState, useEdgesState } from 'reactflow';
+import ReactFlow, { Background, Controls } from 'reactflow';
 import type { Edge, Node, NodeMouseHandler } from 'reactflow';
 import 'reactflow/dist/style.css';
 import type { EvidenceNode, EvidenceEdge } from '../services/api';
@@ -189,7 +189,7 @@ export default function EvidenceGraph({
   }, [evidenceNodes, layoutNodes, compact]);
 
   const rfEdges: Edge[] = useMemo(() => {
-    return evidenceEdges.map((e, index) => {
+    return evidenceEdges.map((e) => {
       const color = EDGE_COLORS[e.relationship] || '#94a3b8';
       const isSelected = selectedEdgeId === e.id;
       const width = STRENGTH_WIDTH[e.strength] || 1;

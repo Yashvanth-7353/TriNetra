@@ -11,15 +11,13 @@ import ReactFlow, {
 import type { Node, Edge, NodeMouseHandler } from 'reactflow';
 import 'reactflow/dist/style.css';
 import {
-  Server, ShieldCheck, Database, Bot, User, LayoutDashboard,
+  Server, ShieldCheck, Database, Bot, User,
   BrainCircuit, Activity, Network, FileSearch, ShieldAlert,
   Cloud, Lock, Code, Cpu, ListTree, Link as LinkIcon,
-  Mic, FolderSearch, Settings, X, ExternalLink, ChevronRight,
+  Mic, FolderSearch, X, ChevronRight,
   Zap, Globe, Cog, Target, Search, BarChart3, GitBranch,
-  Banknote, AlertTriangle, Map, FileText, Eye, Brain,
-  MessagesSquare, Scale, Hash, Layers, Clock, Shield,
-  TrendingUp, PieChart, DollarSign, Landmark,
-  Workflow, ArrowRight, CheckCircle2, AlertCircle,
+  Banknote, AlertTriangle, FileText, Eye, Brain,
+  MessagesSquare, Layers,
 } from 'lucide-react';
 
 // ════════════════════════════════════════════════════════════════
@@ -1398,15 +1396,18 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
   // ════════════════════════════════════════════════════════════════
 
   const edges: Edge[] = useMemo(() => {
-    const mainFlow: Edge = {
-      type: 'smoothstep',
+    // Shared edge fragments (deliberately NOT annotated as Edge: they carry no
+    // id/source/target of their own — they are spread INTO edge literals that
+    // do, so annotating them as Edge would flag every spread as an overwrite).
+    const mainFlow = {
+      type: 'smoothstep' as const,
       animated: true,
       style: { stroke: '#64748b', strokeWidth: 2 },
       markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b', width: 14, height: 14 },
     };
     const internalEdge = { type: 'straight' as const, style: { stroke: '#cbd5e1', strokeWidth: 1.5 } };
-    const dataEdge: Edge = {
-      type: 'smoothstep',
+    const dataEdge = {
+      type: 'smoothstep' as const,
       animated: false,
       style: { stroke: '#94a3b8', strokeWidth: 1.5, strokeDasharray: '6,3' },
       markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 12, height: 12 },
