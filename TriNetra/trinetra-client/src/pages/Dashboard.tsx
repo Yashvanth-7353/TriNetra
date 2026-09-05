@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { MessageSquareText, AlertTriangle, ShieldCheck, ArrowUpRight, Loader2, BarChart2, BellRing, MapPin } from 'lucide-react';
 import { AreaChart, Area, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
-import { fetchCrimeTrend, fetchAnalyticsSummary, fetchPreventionAlerts, type TrendDataPoint } from '../services/api';
+import { fetchAnalyticsSummary, fetchPreventionAlerts, fetchAnalyticsTrends, type TrendDataPoint } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 interface DashboardStats {
@@ -10,6 +10,72 @@ interface DashboardStats {
   solvedPercentage: number;
   highestDistrict: string;
   activeAlertsCount: number;
+}
+
+const DEV = import.meta.env.DEV;
+
+/**
+ * Short-lived, per-tab cache for the dashboard's jurisdiction-scoped data.
+ * The cache key includes the employee id and the effective district scope, so
+ * one user can never be served another user's (or another jurisdiction's)
+ * data; RBAC stays server-side on every cache miss. It absorbs React
+ * StrictMode double-mounts and quick re-navigation without duplicate requests.
+ */
+const DASHBOARD_CACHE_TTL_MS = 30_000;
+interface DashboardPayload {
+  stats: DashboardStats;
+  trendData: TrendDataPoint[];
+}
+const dashboardCache = new Map<string, { at: number; data: DashboardPayload }>();
+const dashboardInFlight = new Map<string, Promise<DashboardPayload>>();
+
+function dashboardCacheKey(employeeId: number | undefined, districtId: number | undefined): string {
+  return `${employeeId ?? 'anon'}|${districtId ?? 'statewide'}`;
+}
+
+async function loadDashboardData(
+  employeeId: number | undefined,
+  districtId: number | undefined
+): Promise<DashboardPayload> {
+  const key = dashboardCacheKey(employeeId, districtId);
+  const cached = dashboardCache.get(key);
+  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  const inFlight = dashboardInFlight.get(key);
+  if (inFlight) return inFlight;
+
+  const request = (async () => {
+    const started = DEV ? performance.now() : 0;
+    // Independent, jurisdiction-scoped endpoints fetched concurrently. The
+    // trend chart uses the direct SQL endpoint -- never the LLM chat pipeline,
+    // which costs seconds just to draw a chart.
+    const [summaryRes, alertsRes, trendsRes] = await Promise.all([
+      fetchAnalyticsSummary({ district_id: districtId }),
+      fetchPreventionAlerts(districtId),
+      fetchAnalyticsTrends({ district_id: districtId }),
+    ]);
+    if (DEV) console.info(`[Dashboard] data loaded in ${(performance.now() - started).toFixed(0)}ms`);
+
+    const payload: DashboardPayload = {
+      stats: {
+        totalCases: summaryRes.total_cases,
+        solvedPercentage: summaryRes.solved_percentage,
+        highestDistrict: summaryRes.highest_activity_district,
+        activeAlertsCount: alertsRes.alerts?.length || 0,
+      },
+      trendData: Array.isArray(trendsRes.trend_data) ? trendsRes.trend_data : [],
+    };
+    dashboardCache.set(key, { at: Date.now(), data: payload });
+    return payload;
+  })();
+
+  dashboardInFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    dashboardInFlight.delete(key);
+  }
 }
 
 export default function Dashboard() {
@@ -21,50 +87,33 @@ export default function Dashboard() {
     activeAlertsCount: 0,
   });
   const [trendData, setTrendData] = useState<TrendDataPoint[]>([]);
-  // The alerts panel is temporarily hidden; the value binding is unused but
-  // the setter still feeds it from the API (kept for the hidden UI section).
-  const [, setLatestAlerts] = useState<any[]>([]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let active = true;
     async function loadDashboard() {
       setIsLoading(true);
       setError(null);
       try {
         const districtId = profile?.district_id;
-
-        // Fetch stats, alerts and trends in parallel
-        const [summaryRes, alertsRes, trendsRes] = await Promise.all([
-          fetchAnalyticsSummary({ district_id: districtId }),
-          fetchPreventionAlerts(districtId),
-          fetchCrimeTrend()
-        ]);
-
-        setStats({
-          totalCases: summaryRes.total_cases,
-          solvedPercentage: summaryRes.solved_percentage,
-          highestDistrict: summaryRes.highest_activity_district,
-          activeAlertsCount: alertsRes.alerts?.length || 0
-        });
-
-        if (alertsRes.alerts) {
-          setLatestAlerts(alertsRes.alerts.slice(0, 3)); // show top 3 on dashboard
-        }
-
-        if (trendsRes.analytics_data && trendsRes.analytics_data.type === 'trend' && Array.isArray(trendsRes.analytics_data.data)) {
-          setTrendData(trendsRes.analytics_data.data);
-        }
+        const payload = await loadDashboardData(profile?.employee_id, districtId);
+        if (!active) return;
+        setStats(payload.stats);
+        setTrendData(payload.trendData);
       } catch (err: any) {
-        setError(err.message || 'Failed to load dashboard data');
+        if (active) setError(err.message || 'Failed to load dashboard data');
       } finally {
-        setIsLoading(false);
+        if (active) setIsLoading(false);
       }
     }
 
     loadDashboard();
-  }, [profile?.district_id]);
+    return () => {
+      active = false;
+    };
+  }, [profile?.district_id, profile?.employee_id]);
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
