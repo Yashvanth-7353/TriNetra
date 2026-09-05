@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages, Plus, MessageSquare, Trash2, History } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { useConversation } from '../context/ConversationContext';
 import { sendChatQuery, sendInvestigationQuery, isInvestigationRequest, sendEvidenceGraph, fetchNextBestActions, exportChat, transcribeAudio, translateText, fetchConversations, createConversation, fetchConversation, deleteConversation, type EvidenceEdge, type EvidenceNode, type NextBestActionLead, type ChatConversation } from '../services/api';
 import NetworkGraph from '../components/NetworkGraph';
 import EvidenceGraph from '../components/EvidenceGraph';
@@ -114,9 +115,11 @@ export default function AskTriNetra() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
 
-  // Persistent conversation history (server-side Catalyst Data Store)
+  // Persistent conversation history (server-side Catalyst Data Store).
+  // The active conversation id is shared with the Voice Copilot so both
+  // surfaces talk to the SAME investigation context and history.
+  const { conversationId, setConversationId, version } = useConversation();
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
@@ -157,19 +160,19 @@ export default function AskTriNetra() {
   useEffect(() => {
     loadConversations();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [version]);
 
   const handleNewChat = async () => {
     try {
       const conversation = await createConversation();
-      setActiveConversationId(conversation.conversation_id);
+      setConversationId(conversation.conversation_id);
       setMessages([]);
       setHistoryError(null);
       await loadConversations();
     } catch (err: any) {
       console.error('Failed to start a new investigation conversation:', err);
       // Fall back to stateless chat when persistence is unavailable.
-      setActiveConversationId(null);
+      setConversationId(null);
       setMessages([]);
       alert('History unavailable: ' + (err.message || 'could not create conversation.'));
     }
@@ -178,7 +181,7 @@ export default function AskTriNetra() {
   const handleOpenConversation = async (conversationId: string) => {
     try {
       const detail = await fetchConversation(conversationId);
-      setActiveConversationId(conversationId);
+      setConversationId(conversationId);
       setMessages(
         detail.messages.map((m) => ({
           id: m.message_id || String(Date.now() + Math.random()),
@@ -194,12 +197,12 @@ export default function AskTriNetra() {
     }
   };
 
-  const handleDeleteConversation = async (conversationId: string) => {
+  const handleDeleteConversation = async (activeId: string) => {
     if (!window.confirm('Delete this investigation history?')) return;
     try {
-      await deleteConversation(conversationId);
-      if (activeConversationId === conversationId) {
-        setActiveConversationId(null);
+      await deleteConversation(activeId);
+      if (conversationId === activeId) {
+        setConversationId(null);
         setMessages([]);
       }
       await loadConversations();
@@ -331,12 +334,12 @@ export default function AskTriNetra() {
         data = await sendInvestigationQuery(
           queryForBackend,
           undefined,
-          activeConversationId || undefined
+          conversationId || undefined
         );
       } else {
         setStatusMessage('TriNetra Engine: Processing query...');
         data = await sendChatQuery(queryForBackend, {
-          conversation_id: activeConversationId || undefined,
+          conversation_id: conversationId || undefined,
         });
       }
 
@@ -390,7 +393,7 @@ export default function AskTriNetra() {
 
       setMessages((prev) => [...prev, botMessage]);
       // Conversation title/metadata may have changed server-side.
-      if (activeConversationId) {
+      if (conversationId) {
         loadConversations();
       }
     } catch (error: any) {
@@ -456,7 +459,7 @@ export default function AskTriNetra() {
               }}
               className={cn(
                 "group flex items-start gap-2 w-full text-left px-2 py-2 rounded-lg mb-0.5 cursor-pointer transition-colors",
-                activeConversationId === conversation.conversation_id
+                conversationId === conversation.conversation_id
                   ? "bg-primary-50 border border-primary-200"
                   : "hover:bg-slate-100 border border-transparent"
               )}
@@ -464,7 +467,7 @@ export default function AskTriNetra() {
               <MessageSquare
                 className={cn(
                   "w-4 h-4 mt-0.5 shrink-0",
-                  activeConversationId === conversation.conversation_id
+                  conversationId === conversation.conversation_id
                     ? "text-primary-700"
                     : "text-slate-400"
                 )}

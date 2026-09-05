@@ -77,6 +77,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Development-only request timing for the latency-sensitive endpoints
+# (dashboard analytics + voice pipeline). Logs durations only — never tokens,
+# audio content, or investigative payloads.
+perf_logger = logging.getLogger("trinetra.perf")
+_PERF_PREFIXES = (
+    "/api/analytics/summary", "/api/analytics/alerts", "/api/analytics/trends",
+    "/api/sarvam/stt", "/api/sarvam/tts", "/api/sarvam/translate",
+    "/api/chat", "/api/investigate",
+)
+
+
+@app.middleware("http")
+async def _perf_timing_middleware(request, call_next):
+    path = request.url.path
+    if request.method == "GET" or any(path.startswith(p) for p in _PERF_PREFIXES):
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        perf_logger.info("[PERF] %s %s total=%.0fms status=%s",
+                         request.method, path, elapsed_ms, response.status_code)
+        return response
+    return await call_next(request)
+
 class LoginRequest(BaseModel):
     employee_id: int
     password: str
@@ -2068,6 +2091,11 @@ class SarvamTranslateRequest(BaseModel):
     source_language: str = "kn-IN"
     target_language: str = "en-IN"
 
+
+class SarvamTTSRequest(BaseModel):
+    text: str
+    language_code: str = "en-IN"
+
 @app.post("/api/sarvam/stt")
 async def sarvam_speech_to_text(
     file: UploadFile = File(...),
@@ -2086,6 +2114,28 @@ async def sarvam_speech_to_text(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sarvam STT failed: {str(e)}")
+
+@app.post("/api/sarvam/tts")
+async def sarvam_text_to_speech_endpoint(
+    req: SarvamTTSRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Converts text to speech (base64 WAV) using Sarvam AI TTS.
+    Authenticated: the Voice Copilot speaks only through this boundary; the
+    browser never calls Sarvam directly."""
+    _require_auth(authorization)
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="Empty text provided for speech synthesis.")
+    try:
+        res = sarvam_engine.text_to_speech(text=req.text, language_code=req.language_code)
+        if "error" in res:
+            raise HTTPException(status_code=500, detail=res["error"])
+        return {"status": "success", "audio_base64": res["audio_base64"], "audio_format": res["audio_format"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sarvam TTS failed: {str(e)}")
+
 
 @app.post("/api/sarvam/translate")
 async def sarvam_translate(

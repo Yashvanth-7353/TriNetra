@@ -1610,9 +1610,13 @@ export async function fetchFinancialAnalysis(
   return response.json();
 }
 
-export async function transcribeAudio(audioBlob: Blob, languageCode: string = 'kn-IN'): Promise<{ transcript: string }> {
+export async function transcribeAudio(
+  audioBlob: Blob,
+  languageCode: string = 'kn-IN',
+  filename: string = 'speech.wav'
+): Promise<{ transcript: string }> {
   const formData = new FormData();
-  formData.append('file', audioBlob, 'speech.wav');
+  formData.append('file', audioBlob, filename);
   formData.append('language_code', languageCode);
 
   const token = getStoredToken();
@@ -1633,6 +1637,32 @@ export async function transcribeAudio(audioBlob: Blob, languageCode: string = 'k
     throw new Error(errorMsg);
   }
 
+  return response.json();
+}
+
+export interface TtsResult {
+  status: string;
+  audio_base64: string;
+  audio_format: string;
+}
+
+/**
+ * Synthesizes speech via the authenticated Sarvam TTS endpoint.
+ * Returns base64 WAV audio; the browser never talks to Sarvam directly.
+ */
+export async function synthesizeSpeech(
+  text: string,
+  languageCode: string = 'en-IN'
+): Promise<TtsResult> {
+  const response = await fetch(`${API_BASE}/api/sarvam/tts`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ text, language_code: languageCode }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Speech synthesis failed' }));
+    throw new Error(err.detail || `HTTP ${response.status}`);
+  }
   return response.json();
 }
 
