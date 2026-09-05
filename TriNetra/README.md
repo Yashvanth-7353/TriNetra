@@ -492,8 +492,11 @@ Two operational notes: JWT signing reads `JWT_SECRET` from the environment (a de
 
 - **Speech-to-text** (`saaras:v3`) with `kn-IN` (Kannada), `en-IN` (English), and other supported language codes — an investigator can dictate a query in Kannada or English;
 - **Translation** (`sarvam-translate:v1`) so a Kannada voice query is translated to English before routing and the response can be toggled back (`/api/sarvam/stt`, `/api/sarvam/translate`, both JWT-protected).
+- **Text-to-speech** (`bulbul:v3`) returning base64 WAV audio (`/api/sarvam/tts`, JWT-protected) for spoken answers.
 
 The chat page exposes a microphone button and an English ⇄ ಕನ್ನಡ toggle; the transcribed/translated text flows through the *same* deterministic routing described above.
+
+**TriNetra Voice Copilot** (new): a floating, draggable, voice-first assistant mounted in the authenticated shell (`src/components/voice/`). It speaks the welcome prompt, listens on click (no continuous mic), transcribes through the Sarvam STT above, sends the text through the *existing* `/api/chat` or `/api/investigate` pipeline with the same shared `conversation_id`/investigation context as AskTriNetra, speaks a concise, deterministic, evidence-grounded answer via Sarvam TTS (English or Kannada), and offers strictly whitelisted screen-action buttons (e.g. open Network Analysis, Financial Trail). Voice is an interface only — it never bypasses intent routing, RBAC, or the scope firewall, and it creates no second AI pipeline. Its position is stored locally (`localStorage`), never in the database.
 
 ---
 
@@ -539,7 +542,7 @@ See [How the system works](#how-the-system-works) for the full diagram. In one s
 | Data | Neon PostgreSQL (`NEON_DATABASE_URL`), psycopg2 |
 | Vectors | pgvector (`CaseNarrativeEmbedding`, 768-dim embeddings) |
 | LLM | Groq `openai/gpt-oss-120b` (routing, synthesis, NL2SQL), Google Gemini `gemini-embedding-001` (embeddings) |
-| Speech/translation | Sarvam AI `saaras:v3`, `sarvam-translate:v1` |
+| Speech/translation | Sarvam AI `saaras:v3` (STT), `sarvam-translate:v1`, `bulbul:v3` (TTS) |
 | Chat history | Zoho Catalyst Data Store (`zcatalyst-sdk` Python) — conversations/messages/context |
 | Auth | JWT (HS256), rank-derived RBAC |
 | Graphs | NetworkX (backend), React Flow (frontend) |
