@@ -33,6 +33,16 @@ export interface VoiceAssistantState {
 }
 
 const WELCOME_EN = 'Welcome to TriNetra. How can I help you?';
+
+/**
+ * First-login spoken introduction. The product name is written with explicit
+ * syllables ("Tri-Ne-tra") ONLY in this spoken string so the Indian-English
+ * Sarvam voice lands on "Tri-Ne-tra" — the visible UI keeps the brand text
+ * "TriNetra" unchanged. Scoped strictly to onboarding; investigation answers
+ * and the regular greeting are never altered.
+ */
+const INTRO_SPOKEN_EN =
+  'Hello. I am Tri-Ne-tra AI. I help you combine fragmented evidence, discover connections, and investigate cases faster. Whenever you are ready, you can ask me.';
 const AUTO_STOP_MS = 30_000;
 const DEV = import.meta.env.DEV;
 
@@ -106,6 +116,9 @@ export function useVoiceAssistant() {
   const autoStopTimerRef = useRef<number | null>(null);
   // True only for a genuine cancel; a normal Stop must still transcribe.
   const cancelledRef = useRef(false);
+  // True when the user reached this interaction from the onboarding intro,
+  // so the redundant "Welcome to TriNetra" greeting is skipped entirely.
+  const skipGreetingRef = useRef(false);
 
   /** Stops tracks + clears recorder state. Never decides the transcript fate. */
   const teardownMic = useCallback(() => {
@@ -149,10 +162,21 @@ export function useVoiceAssistant() {
     (text: string, language: string, isGreeting = false): Promise<void> =>
       new Promise((resolve) => {
         stopAudio();
+        // Capture the interaction generation. seqRef bumps on every cancel(),
+        // startInteraction() and unmount, so an in-flight synthesis that
+        // resolves after a newer interaction began is never played over it
+        // (e.g. the intro speech finishing after Ask TriNetra was clicked).
+        const gen = seqRef.current;
         const cacheKey = `${text}|${language}`;
         const cached = greetingAudioCache.get(cacheKey);
 
         const play = (base64: string) => {
+          if (seqRef.current !== gen) {
+            // A newer interaction started while synthesis was in flight —
+            // discard this stale audio without playing it.
+            resolve();
+            return;
+          }
           const audio = new Audio(`data:audio/wav;base64,${base64}`);
           audioRef.current = audio;
           const finish = () => {
@@ -403,10 +427,20 @@ export function useVoiceAssistant() {
         }
       };
 
+      // Onboarding path: the user already heard the intro speech ("Hello.
+      // I'm TriNetra AI...") and clicked Ask TriNetra — going straight to the
+      // microphone avoids two overlapping/duplicate spoken greetings.
+      if (skipGreetingRef.current) {
+        skipGreetingRef.current = false;
+        stopAudio();
+        await finishGreeting();
+        return;
+      }
+
       await speak(greeting, speechLang, true);
       await finishGreeting();
     },
-    [lang, speak, transcribeAndRun]
+    [lang, speak, stopAudio, transcribeAndRun]
   );
 
   /** Normal Stop: ends capture but lets onstop run the STT pipeline. */
@@ -436,15 +470,18 @@ export function useVoiceAssistant() {
     setIsRecording(false);
   }, [stopAudio, teardownMic]);
 
-  const startInteraction = useCallback(() => {
+  const startInteraction = useCallback((opts?: { skipGreeting?: boolean; open?: boolean }) => {
     const seq = ++seqRef.current;
     cancelledRef.current = false;
+    skipGreetingRef.current = Boolean(opts?.skipGreeting);
+    // The onboarding CTA lands the user on the visible listening panel.
+    if (opts?.open) setIsOpen(true);
     setStatus('activating');
     setLastQuery(null);
     setLastAnswer(null);
     setLastActions([]);
     setErrorMessage(null);
-    trace('activation');
+    trace('activation', { skipGreeting: skipGreetingRef.current });
     // Kick off mic permission immediately (parallel with the greeting);
     // resolves to null on failure — handled when greeting finishes.
     const micReady = navigator.mediaDevices
@@ -494,6 +531,12 @@ export function useVoiceAssistant() {
     setLang((prev) => (prev === 'EN' ? 'KN' : 'EN'));
   }, []);
 
+  /** Speaks the one-time onboarding introduction (English). Cached like the
+   *  greeting; failures degrade to a silent intro, never an error state. */
+  const speakIntro = useCallback((): Promise<void> => {
+    return speak(INTRO_SPOKEN_EN, 'en-IN', true);
+  }, [speak]);
+
   // Unmount cleanup: microphone, audio, timers, everything.
   useEffect(() => {
     return () => {
@@ -518,6 +561,7 @@ export function useVoiceAssistant() {
     cancel,
     stopRecording,
     toggleLang,
+    speakIntro,
     begin: startInteraction,
   };
 }

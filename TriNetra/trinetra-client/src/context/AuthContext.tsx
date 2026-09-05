@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
 
 export interface UserProfile {
   employee_id: number;
@@ -23,16 +23,23 @@ interface AuthState {
   token: string | null;
   profile: UserProfile | null;
   isAuthenticated: boolean;
+  // One-shot flag: armed by every successful login, disarmed on logout and
+  // consumed by the Voice Copilot's first-login introduction so it shows
+  // exactly once per authenticated session (never on refresh/route change).
+  introEligible: boolean;
   login: (token: string, profile: UserProfile) => void;
   logout: () => void;
+  consumeIntro: () => void;
 }
 
 const AuthContext = createContext<AuthState>({
   token: null,
   profile: null,
   isAuthenticated: false,
+  introEligible: false,
   login: () => {},
   logout: () => {},
+  consumeIntro: () => {},
 });
 
 export function useAuth() {
@@ -47,6 +54,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const stored = localStorage.getItem('trinetra_profile');
     return stored ? JSON.parse(stored) : null;
   });
+  // False on page load (a refresh/restored session is NOT a fresh login), so
+  // the intro only arms when login() runs.
+  const [introEligible, setIntroEligible] = useState(false);
 
   const isAuthenticated = !!token && !!profile;
 
@@ -55,6 +65,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile(newProfile);
     localStorage.setItem('trinetra_token', newToken);
     localStorage.setItem('trinetra_profile', JSON.stringify(newProfile));
+    setIntroEligible(true);
   };
 
   const logout = () => {
@@ -62,10 +73,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile(null);
     localStorage.removeItem('trinetra_token');
     localStorage.removeItem('trinetra_profile');
+    setIntroEligible(false);
   };
 
+  const consumeIntro = useCallback(() => {
+    setIntroEligible(false);
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ token, profile, isAuthenticated, login, logout }}>
+    <AuthContext.Provider value={{ token, profile, isAuthenticated, introEligible, login, logout, consumeIntro }}>
       {children}
     </AuthContext.Provider>
   );
