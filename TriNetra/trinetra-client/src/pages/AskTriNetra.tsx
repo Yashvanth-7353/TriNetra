@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Send, FileDown, Mic, Square, Loader2, ChevronDown, ChevronUp, Bot, User, Globe, AlertCircle, Languages, Plus, MessageSquare, Trash2, History } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useConversation } from '../context/ConversationContext';
@@ -114,6 +115,10 @@ export default function AskTriNetra() {
   const [lang, setLang] = useState<'EN' | 'KN'>('EN');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
+  // Handoff from the Voice Copilot: /ask?conversation_id=<id> opens
+  // the SAME persistent conversation (messages + context), never a new one.
+  const [searchParams] = useSearchParams();
+  const urlHandoffRef = useRef<string | null>(null);
 
   // Persistent conversation history (server-side Catalyst Data Store).
   // The active conversation id is shared with the Voice Copilot so both
@@ -196,6 +201,20 @@ export default function AskTriNetra() {
       alert('Could not open conversation: ' + (err.message || 'unknown error'));
     }
   };
+
+  // StrictMode-safe: loads the ?conversation_id= handoff exactly once
+  // per distinct id (the ref is set synchronously in setup, so a dev
+  // double-invoke skips the second load). Reuses handleOpenConversation,
+  // which fetches the persisted messages/context and sets it as the
+  // active shared conversation.
+  useEffect(() => {
+    const cid = searchParams.get('conversation_id');
+    if (!cid) return;
+    if (urlHandoffRef.current === cid) return;
+    urlHandoffRef.current = cid;
+    void handleOpenConversation(cid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const handleDeleteConversation = async (activeId: string) => {
     if (!window.confirm('Delete this investigation history?')) return;

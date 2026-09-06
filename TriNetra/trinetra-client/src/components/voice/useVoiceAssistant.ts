@@ -116,9 +116,6 @@ export function useVoiceAssistant() {
   const autoStopTimerRef = useRef<number | null>(null);
   // True only for a genuine cancel; a normal Stop must still transcribe.
   const cancelledRef = useRef(false);
-  // True when the user reached this interaction from the onboarding intro,
-  // so the redundant "Welcome to TriNetra" greeting is skipped entirely.
-  const skipGreetingRef = useRef(false);
 
   /** Stops tracks + clears recorder state. Never decides the transcript fate. */
   const teardownMic = useCallback(() => {
@@ -157,15 +154,17 @@ export function useVoiceAssistant() {
 
   /** Speaks text through the existing Sarvam TTS path. Resolves on completion.
    *  Only greeting audio is cached; investigation answers always synthesize
-   *  fresh because they are user-specific data. */
+   *  fresh because they are user-specific data.
+   *  `traceTag` (e.g. 'intro') enables DEV-only end-to-end audio tracing so a
+   *  "TTS 200 but silent" regression can be pinned to synthesis vs playback. */
   const speak = useCallback(
-    (text: string, language: string, isGreeting = false): Promise<void> =>
+    (text: string, language: string, isGreeting = false, traceTag = ''): Promise<void> =>
       new Promise((resolve) => {
         stopAudio();
         // Capture the interaction generation. seqRef bumps on every cancel(),
         // startInteraction() and unmount, so an in-flight synthesis that
         // resolves after a newer interaction began is never played over it
-        // (e.g. the intro speech finishing after Ask TriNetra was clicked).
+        // (e.g. the intro speech finishing after the user moved on).
         const gen = seqRef.current;
         const cacheKey = `${text}|${language}`;
         const cached = greetingAudioCache.get(cacheKey);
@@ -174,9 +173,11 @@ export function useVoiceAssistant() {
           if (seqRef.current !== gen) {
             // A newer interaction started while synthesis was in flight —
             // discard this stale audio without playing it.
+            traceTag && trace(`${traceTag}:audio:stale-discarded`);
             resolve();
             return;
           }
+          traceTag && trace(`${traceTag}:audio:created`, { bytes: base64.length });
           const audio = new Audio(`data:audio/wav;base64,${base64}`);
           audioRef.current = audio;
           const finish = () => {
@@ -185,12 +186,23 @@ export function useVoiceAssistant() {
             audioRef.current = null;
             resolve();
           };
+          if (traceTag) {
+            audio.addEventListener('canplay', () => trace(`${traceTag}:audio:canplay`));
+            audio.addEventListener('playing', () => trace(`${traceTag}:audio:playing`));
+            audio.addEventListener('ended', () => trace(`${traceTag}:audio:ended`));
+            audio.addEventListener('error', () => trace(`${traceTag}:audio:error`));
+          }
           audio.onended = finish;
           audio.onerror = () => {
+            traceTag && trace(`${traceTag}:audio:error`);
             console.warn('Voice Copilot audio playback failed');
             finish();
           };
+          traceTag && trace(`${traceTag}:audio:load`);
+          audio.load();
+          traceTag && trace(`${traceTag}:audio:play`);
           audio.play().catch(() => {
+            traceTag && trace(`${traceTag}:audio:play-rejected`);
             console.warn('Voice Copilot playback rejected');
             finish();
           });
@@ -201,9 +213,11 @@ export function useVoiceAssistant() {
           return;
         }
         trace('tts:start', { text: text.slice(0, 40) });
+        traceTag && trace(`${traceTag}:tts:request`);
         synthesizeSpeech(text, language)
           .then((res) => {
             trace('tts:success', { bytes: res.audio_base64.length });
+            traceTag && trace(`${traceTag}:tts:success`, { bytes: res.audio_base64.length });
             if (isGreeting) {
               greetingAudioCache.set(cacheKey, res.audio_base64);
             }
@@ -213,6 +227,7 @@ export function useVoiceAssistant() {
             // TTS failure: never blocks the investigation; answer stays on screen.
             console.warn('Voice Copilot TTS failed:', err);
             trace('tts:failed');
+            traceTag && trace(`${traceTag}:tts:failed`);
             resolve();
           });
       }),
@@ -250,12 +265,11 @@ export function useVoiceAssistant() {
       setLastQuery(displayText);
       setStatus('processing');
 
-      // Same conversation as AskTriNetra: reuse active id, create one only
-      // when none exists (same existing persistence mechanism).
-      let convId: string | null = conversationId;
-      if (!convId) {
-        convId = await ensureConversation();
-      }
+      // Same conversation as AskTriNetra: ensureConversation() is idempotent
+      // and race-safe, so every voice question in this login reuses the SAME
+      // conversation id (created once, lazily, on the first question) — one
+      // conversation per authenticated session, never one per question.
+      const convId = await ensureConversation();
       if (seqRef.current !== seq) return;
 
       try {
@@ -310,7 +324,7 @@ export function useVoiceAssistant() {
         }
       }
     },
-    [conversationId, ensureConversation, fail, lang, speak]
+    [ensureConversation, fail, lang, speak]
   );
 
   const transcribeAndRun = useCallback(
@@ -427,20 +441,10 @@ export function useVoiceAssistant() {
         }
       };
 
-      // Onboarding path: the user already heard the intro speech ("Hello.
-      // I'm TriNetra AI...") and clicked Ask TriNetra — going straight to the
-      // microphone avoids two overlapping/duplicate spoken greetings.
-      if (skipGreetingRef.current) {
-        skipGreetingRef.current = false;
-        stopAudio();
-        await finishGreeting();
-        return;
-      }
-
       await speak(greeting, speechLang, true);
       await finishGreeting();
     },
-    [lang, speak, stopAudio, transcribeAndRun]
+    [lang, speak, transcribeAndRun]
   );
 
   /** Normal Stop: ends capture but lets onstop run the STT pipeline. */
@@ -470,18 +474,15 @@ export function useVoiceAssistant() {
     setIsRecording(false);
   }, [stopAudio, teardownMic]);
 
-  const startInteraction = useCallback((opts?: { skipGreeting?: boolean; open?: boolean }) => {
+  const startInteraction = useCallback(() => {
     const seq = ++seqRef.current;
     cancelledRef.current = false;
-    skipGreetingRef.current = Boolean(opts?.skipGreeting);
-    // The onboarding CTA lands the user on the visible listening panel.
-    if (opts?.open) setIsOpen(true);
     setStatus('activating');
     setLastQuery(null);
     setLastAnswer(null);
     setLastActions([]);
     setErrorMessage(null);
-    trace('activation', { skipGreeting: skipGreetingRef.current });
+    trace('activation');
     // Kick off mic permission immediately (parallel with the greeting);
     // resolves to null on failure — handled when greeting finishes.
     const micReady = navigator.mediaDevices
@@ -532,9 +533,10 @@ export function useVoiceAssistant() {
   }, []);
 
   /** Speaks the one-time onboarding introduction (English). Cached like the
-   *  greeting; failures degrade to a silent intro, never an error state. */
+   *  greeting; failures degrade to a silent intro, never an error state. The
+   *  'intro' trace tag exposes DEV-only end-to-end audio tracing. */
   const speakIntro = useCallback((): Promise<void> => {
-    return speak(INTRO_SPOKEN_EN, 'en-IN', true);
+    return speak(INTRO_SPOKEN_EN, 'en-IN', true, 'intro');
   }, [speak]);
 
   // Unmount cleanup: microphone, audio, timers, everything.
@@ -556,6 +558,10 @@ export function useVoiceAssistant() {
     lastAnswer,
     lastActions,
     errorMessage,
+    // The active conversation id (shared with AskTriNetra via the context).
+    // Used by the panel's "Continue in Ask TriNetra" handoff so the detailed
+    // investigation opens the SAME conversation, never a new one.
+    conversationId,
     toggleOpen,
     closePanel,
     cancel,

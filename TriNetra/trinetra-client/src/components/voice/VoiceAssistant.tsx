@@ -1,22 +1,38 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mic, X, Languages, Loader2, Square, Radar, ArrowRight } from 'lucide-react';
+import { Mic, X, Languages, Loader2, Square, Radar } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../context/AuthContext';
 import { useVoiceAssistant, type AssistantStatus } from './useVoiceAssistant';
 
 const ORB_SIZE = 56;
+const INTRO_ORB_SIZE = 132;
 const PANEL_HEIGHT = 360;
 const MARGIN = 12;
 const POSITION_KEY = 'trinetra_voice_assistant_pos_v1';
-const INTRO_TRANSITION_MS = 450;
+const INTRO_TRAVEL_MS = 1150;
+const INTRO_PULSE_MS = 800;
+const INTRO_EXIT_MS = 500;
+const INTRO_MIN_HOLD_MS = 5500;
 
 /**
  * Presentation modes for the copilot:
  * - 'floating': the normal small draggable orb + panel (saved position).
- * - 'intro': the one-time centered, enlarged onboarding presentation.
+ * - 'intro': the automatic, session-scoped onboarding presentation that
+ *   centers the enlarged assistant, speaks, then physically travels the orb
+ *   to its normal floating position. No buttons — fully automatic.
  */
 type AssistantPresentationMode = 'floating' | 'intro';
+
+/**
+ * Intro lifecycle stages:
+ * - 'center':   enlarged orb + text centered on screen (staggered entrance).
+ * - 'exiting':  text fades out while the orb stays centered.
+ * - 'travel':   the orb glides from center to the saved corner position
+ *               while shrinking to normal size.
+ * - 'arrive':   subtle one-shot pulse ring at the corner before settling.
+ */
+type IntroStage = 'center' | 'exiting' | 'travel' | 'arrive';
 
 interface Position {
   x: number;
@@ -28,6 +44,10 @@ function prefersReducedMotion(): boolean {
     typeof window !== 'undefined' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
   );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function loadPosition(): Position {
@@ -72,22 +92,27 @@ export default function VoiceAssistant() {
   const navigate = useNavigate();
   const { profile, introEligible, consumeIntro } = useAuth();
   const assistant = useVoiceAssistant();
-  const { status, isOpen, lang, isRecording, lastQuery, lastAnswer, lastActions, errorMessage } = assistant;
+  const { status, isOpen, lang, isRecording, lastQuery, lastAnswer, lastActions, errorMessage, conversationId, speakIntro } = assistant;
 
   const [mode, setMode] = useState<AssistantPresentationMode>('floating');
-  const [introOpen, setIntroOpen] = useState(false);
-  // When returning from intro, fade the orb back in at its saved position.
-  const [returning, setReturning] = useState(false);
+  const [introStage, setIntroStage] = useState<IntroStage>('center');
+  const [introTextIn, setIntroTextIn] = useState(false);
+  // Rect of the traveling orb during intro (left/top/width/height).
+  const [orbRect, setOrbRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const [traveling, setTraveling] = useState(false);
 
   const [position, setPosition] = useState<Position>(() => clamp(loadPosition(), false));
   const dragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null);
   const movedRef = useRef(false);
   const latestPosRef = useRef(position);
   const orbRef = useRef<HTMLButtonElement | null>(null);
-  const introCardRef = useRef<HTMLDivElement | null>(null);
-  const introAskRef = useRef<HTMLButtonElement | null>(null);
   const introHandledRef = useRef(false);
-  const introTimerRef = useRef<number | null>(null);
+  const introRunRef = useRef(false);
+  const introCardRef = useRef<HTMLDivElement | null>(null);
+  // Ref to the enlarged orb rendered as the first flex child of the centered
+  // intro column. Its real rect is measured when the travel phase starts so
+  // the absolutely-positioned traveling orb can take over pixel-perfect.
+  const introOrbRef = useRef<HTMLDivElement | null>(null);
 
   // Keep the assistant inside the viewport after resize / panel state changes.
   useEffect(() => {
@@ -102,84 +127,16 @@ export default function VoiceAssistant() {
 
   // Session-scoped intro: AuthContext arms introEligible on EVERY successful
   // login and disarms it on logout, so the introduction shows exactly once per
-  // authenticated session — not once per employee/browser. It is consumed
-  // immediately, so a refresh, route change or AppShell re-render can never
-  // re-trigger it. A ref guards the StrictMode double-invoke so the intro
-  // (and its speech) can never start twice.
+  // authenticated session — never on refresh/route change/AppShell re-render.
+  // A ref guards the StrictMode double-invoke, so a dev remount can never
+  // start the intro (or its speech/animation) twice.
   useEffect(() => {
     if (!profile || !introEligible || introHandledRef.current) return;
     introHandledRef.current = true;
     consumeIntro(); // consume now — this session's intro is spent
-    setMode('intro');
-    // Trigger the CSS transition (opacity/scale) on the next frame. The frame
-    // is intentionally NOT cancelled on cleanup: in dev, StrictMode runs
-    // setup -> cleanup -> setup, and cancelling here would leave the card
-    // stuck at opacity-0 after the ref guard skips the second setup.
-    requestAnimationFrame(() => setIntroOpen(true));
-    void assistant.speakIntro();
+    void runIntro();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, introEligible, consumeIntro]);
-
-  const clearIntroTimer = useCallback(() => {
-    if (introTimerRef.current !== null) {
-      window.clearTimeout(introTimerRef.current);
-      introTimerRef.current = null;
-    }
-  }, []);
-
-  /** Dismiss the intro and smoothly return the orb to floating mode. */
-  const dismissIntro = useCallback(() => {
-    setIntroOpen(false);
-    setReturning(true);
-    assistant.cancel(); // stops any intro audio still playing
-    clearIntroTimer();
-    if (prefersReducedMotion()) {
-      setMode('floating');
-      requestAnimationFrame(() => setReturning(false));
-      return;
-    }
-    introTimerRef.current = window.setTimeout(() => {
-      setMode('floating');
-      // Fade the orb in at its saved position.
-      requestAnimationFrame(() => setReturning(false));
-    }, INTRO_TRANSITION_MS);
-  }, [assistant, clearIntroTimer]);
-
-  /** CTA: start the existing interaction, skipping the redundant welcome and
-   *  opening the floating panel so the listening UI is immediately visible. */
-  const handleIntroAsk = useCallback(() => {
-    dismissIntro();
-    assistant.begin({ skipGreeting: true, open: true });
-  }, [assistant, dismissIntro]);
-
-  /** Secondary: just dismiss; the normal orb remains available. */
-  const handleIntroLater = useCallback(() => {
-    dismissIntro();
-  }, [dismissIntro]);
-
-  // Escape dismisses the intro (keyboard accessibility).
-  useEffect(() => {
-    if (mode !== 'intro') return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') dismissIntro();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [mode, dismissIntro]);
-
-  // Focus the primary CTA when the intro appears; restore focus on close.
-  useEffect(() => {
-    if (mode === 'intro') {
-      const t = window.setTimeout(() => introAskRef.current?.focus(), 120);
-      return () => window.clearTimeout(t);
-    }
-    if (mode === 'floating' && introCardRef.current) {
-      orbRef.current?.focus();
-    }
-  }, [mode]);
-
-  // Unmount cleanup for the intro timer.
-  useEffect(() => clearIntroTimer, [clearIntroTimer]);
 
   const persist = useCallback((pos: Position) => {
     try {
@@ -188,6 +145,72 @@ export default function VoiceAssistant() {
       /* storage unavailable — position simply won't persist */
     }
   }, []);
+
+  /**
+   * Automatic intro timeline. All timers are created inside this async flow
+   * (not in effect cleanups), so React StrictMode's setup→cleanup→setup cycle
+   * can neither double-start it nor cancel it mid-flight. The speech starts
+   * after an initial delay — deliberately after StrictMode's synchronous
+   * cleanup has finished — so the generation guard in speak() captures a
+   * stable sequence and does NOT discard the intro audio as stale.
+   */
+  const runIntro = useCallback(async () => {
+    if (introRunRef.current) return;
+    introRunRef.current = true;
+
+    const reduced = prefersReducedMotion();
+    setMode('intro');
+    setIntroStage('center');
+    setTraveling(false);
+    setOrbRect(null);
+    setIntroTextIn(false);
+
+    // Phase 1 — entrance: settle + staggered text fade-in.
+    requestAnimationFrame(() => setIntroTextIn(true));
+    await sleep(750);
+
+    // Phase 2 — speech begins while the intro is fully visible. Resolves when
+    // playback ends; resolves early if TTS fails (visual hold still applies).
+    const speech = speakIntro();
+    await Promise.all([speech, sleep(INTRO_MIN_HOLD_MS)]);
+
+    // Phase 3 — text fades out; orb stays centered for a beat.
+    setIntroTextIn(false);
+    await sleep(INTRO_EXIT_MS);
+
+    // Phase 4 — travel the orb from center to the saved corner position while
+    // shrinking it to normal size. Reduced motion skips the travel and drops
+    // straight into the normal floating orb at the corner.
+    if (reduced) {
+      setMode('floating');
+      setOrbRect(null);
+      return;
+    }
+    const target = clamp(latestPosRef.current, false);
+    // Measure the enlarged flex-column orb so the traveling orb takes over at
+    // exactly the same position/size (seamless swap, no jump or double orb).
+    const orbNode = introOrbRef.current;
+    if (orbNode) {
+      const r = orbNode.getBoundingClientRect();
+      setOrbRect({ left: r.left, top: r.top, width: r.width, height: r.height });
+    }
+    setIntroStage('travel');
+    await sleep(30); // let the current frame paint at center before transitioning
+    setTraveling(true);
+    setOrbRect({ left: target.x, top: target.y, width: ORB_SIZE, height: ORB_SIZE });
+    await sleep(INTRO_TRAVEL_MS);
+
+    // Phase 5 — subtle arrival pulse at the corner.
+    setIntroStage('arrive');
+    await sleep(INTRO_PULSE_MS);
+
+    // Phase 6 — normal floating assistant at the saved position.
+    setMode('floating');
+    setOrbRect(null);
+    setTraveling(false);
+    setIntroStage('center');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speakIntro]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     dragRef.current = {
@@ -230,67 +253,130 @@ export default function VoiceAssistant() {
     assistant.toggleOpen();
   };
 
-  // ── INTRO MODE: centered, enlarged, one-time onboarding ──
+  // ── INTRO MODE: automatic, centered, session-scoped onboarding ──
   if (mode === 'intro') {
+    // Responsive enlarged orb size (120–140px on typical screens, capped on
+    // small viewports) — the orb stays the focal point; text sits below it.
+    const orbSize = Math.min(
+      INTRO_ORB_SIZE,
+      Math.round(window.innerWidth * 0.3),
+      Math.round(window.innerHeight * 0.3)
+    );
+    // The flex column (orb + text card) is visible while centered; it unmounts
+    // exactly when the traveling orb takes over at the measured rect.
+    const columnVisible = introStage === 'center' || introStage === 'exiting';
+
     return (
-      <div
-        className="fixed inset-0 z-50 flex items-center justify-center p-4"
-        role="presentation"
-      >
+      <div className="fixed inset-0 z-50 pointer-events-none" role="presentation">
         {/* Subtle dim — the dashboard stays visibly alive behind the intro. */}
-        <div
-          className="absolute inset-0 bg-primary-900/25"
-          onClick={handleIntroLater}
-          aria-hidden="true"
-        />
-        <div
-          ref={introCardRef}
-          role="dialog"
-          aria-modal="false"
-          aria-labelledby="voice-intro-title"
-          aria-describedby="voice-intro-desc"
-          className={cn(
-            'relative z-10 w-full max-w-[440px] rounded-2xl bg-white border border-slate-200 shadow-2xl shadow-primary-900/20 p-6 md:p-8 text-center transition-all duration-500 ease-out motion-reduce:transition-none',
-            introOpen ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-90 translate-y-3'
-          )}
-        >
-          {/* The assistant itself is the centerpiece: enlarged orb, no cartoon. */}
-          <div className="mx-auto mb-5 flex h-[120px] w-[120px] md:h-[140px] md:w-[140px] items-center justify-center rounded-full bg-primary-900 shadow-xl shadow-primary-900/30 ring-8 ring-primary-900/5">
-            <Radar className="h-12 w-12 text-accent-500 md:h-14 md:w-14" aria-hidden="true" />
-          </div>
+        <div className="absolute inset-0 bg-primary-900/25" aria-hidden="true" />
 
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-accent-500/20 bg-accent-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-accent-600">
-            Voice AI
-          </span>
-
-          <h2 id="voice-intro-title" className="mt-3 text-2xl font-bold text-primary-900 md:text-3xl">
-            I&apos;m TriNetra AI
-          </h2>
-          <p id="voice-intro-desc" className="mt-3 text-sm leading-relaxed text-slate-600 md:text-base">
-            I help you combine fragmented evidence, discover connections,
-            and investigate cases faster.
-          </p>
-          <p className="mt-2 text-xs text-slate-400 md:text-sm">
-            Ask me about cases, networks, financial trails, and more.
-          </p>
-
-          <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <button
-              ref={introAskRef}
-              onClick={handleIntroAsk}
-              className="inline-flex items-center gap-2 rounded-lg bg-accent-500 px-6 py-3 text-sm font-bold text-primary-900 shadow-lg shadow-accent-500/20 transition-all duration-200 hover:-translate-y-0.5 hover:bg-accent-400 focus-visible:outline-2 focus-visible:outline-accent-500 focus-visible:outline-offset-2"
+        {/* Centered column: enlarged orb, gap, then the readable text card. */}
+        {columnVisible && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center px-4">
+            {/* Large orb — the assistant's identity, clearly separated from text. */}
+            <div
+              ref={introOrbRef}
+              className="flex shrink-0 items-center justify-center rounded-full bg-primary-900 shadow-xl shadow-primary-900/30 ring-8 ring-primary-900/5"
+              style={{ width: orbSize, height: orbSize }}
             >
-              Ask TriNetra
-              <ArrowRight className="h-4 w-4" aria-hidden="true" />
-            </button>
-            <button
-              onClick={handleIntroLater}
-              className="rounded-lg px-4 py-3 text-sm font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-primary-900 focus-visible:outline-2 focus-visible:outline-accent-500 focus-visible:outline-offset-2"
+              <Radar
+                className="h-12 w-12 text-accent-500 md:h-14 md:w-14"
+                aria-hidden="true"
+              />
+            </div>
+
+            {/* Text card — white surface so the intro stays readable over the
+                dashboard; fades together with the text before the orb travels. */}
+            <div
+              ref={introCardRef}
+              role="dialog"
+              aria-modal="false"
+              aria-labelledby="voice-intro-title"
+              aria-describedby="voice-intro-desc"
+              className={cn(
+                'mt-8 w-full max-w-[560px] rounded-2xl bg-white border border-slate-200 shadow-2xl shadow-primary-900/15 px-6 py-6 md:px-8 md:py-7 text-center transition-opacity duration-500 motion-reduce:transition-none md:mt-10',
+                introTextIn ? 'opacity-100' : 'opacity-0'
+              )}
             >
-              Maybe later
-            </button>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border border-accent-500/20 bg-accent-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-accent-600 transition-all duration-500 motion-reduce:transition-none',
+                  introTextIn ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'
+                )}
+                style={{ transitionDelay: introTextIn ? '150ms' : '0ms' }}
+              >
+                Voice AI
+              </span>
+              <h2
+                id="voice-intro-title"
+                className={cn(
+                  'mt-3 text-2xl font-bold text-primary-900 transition-all duration-500 motion-reduce:transition-none md:text-3xl',
+                  introTextIn ? 'translate-y-0 opacity-100' : 'translate-y-3 opacity-0'
+                )}
+                style={{ transitionDelay: introTextIn ? '300ms' : '0ms' }}
+              >
+                I&apos;m TriNetra AI
+              </h2>
+              <p
+                id="voice-intro-desc"
+                className={cn(
+                  'mt-3 max-w-md text-sm leading-relaxed text-slate-600 transition-all duration-500 motion-reduce:transition-none md:text-base',
+                  introTextIn ? 'translate-y-0 opacity-100' : 'translate-y-3 opacity-0'
+                )}
+                style={{ transitionDelay: introTextIn ? '450ms' : '0ms' }}
+              >
+                I help you combine fragmented evidence, discover connections,
+                and investigate cases faster.
+              </p>
+              <p
+                className={cn(
+                  'mt-2 text-xs text-slate-400 transition-all duration-500 motion-reduce:transition-none md:text-sm',
+                  introTextIn ? 'translate-y-0 opacity-100' : 'translate-y-3 opacity-0'
+                )}
+                style={{ transitionDelay: introTextIn ? '600ms' : '0ms' }}
+              >
+                Ask me about cases, networks, financial trails, and more.
+              </p>
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* Traveling orb: appears at the flex orb's exact rect, then glides to
+            the corner. Only mounted during travel/arrive — the text card never
+            follows the orb. */}
+        {orbRect && !columnVisible && (
+          <div
+            className={cn(
+              'absolute z-10 flex items-center justify-center rounded-full bg-primary-900 shadow-xl shadow-primary-900/30',
+              introStage === 'arrive' ? 'ring-4 ring-accent-500/40' : 'ring-8 ring-primary-900/5'
+            )}
+            style={{
+              left: orbRect.left,
+              top: orbRect.top,
+              width: orbRect.width,
+              height: orbRect.height,
+              transition: traveling
+                ? `left ${INTRO_TRAVEL_MS}ms cubic-bezier(0.45, 0, 0.3, 1), top ${INTRO_TRAVEL_MS}ms cubic-bezier(0.45, 0, 0.3, 1), width ${INTRO_TRAVEL_MS}ms cubic-bezier(0.45, 0, 0.3, 1), height ${INTRO_TRAVEL_MS}ms cubic-bezier(0.45, 0, 0.3, 1)`
+                : 'none',
+            }}
+          >
+            <Radar
+              className={cn(
+                'text-accent-500 transition-all duration-300 motion-reduce:transition-none',
+                orbRect.width > ORB_SIZE ? 'h-12 w-12 md:h-14 md:w-14' : 'h-5 w-5'
+              )}
+              aria-hidden="true"
+            />
+            {/* Arrival cue — subtle one-shot pulse ring. */}
+            {introStage === 'arrive' && (
+              <span
+                className="absolute inset-0 rounded-full animate-ping bg-accent-500/30 motion-reduce:animate-none"
+                aria-hidden="true"
+              />
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -302,10 +388,7 @@ export default function VoiceAssistant() {
 
   return (
     <div
-      className={cn(
-        'fixed z-50 select-none transition-opacity duration-300 motion-reduce:transition-none',
-        returning ? 'opacity-0' : 'opacity-100'
-      )}
+      className="fixed z-50 select-none"
       style={{ left: position.x, top: position.y }}
       aria-label="TriNetra Voice Copilot"
     >
@@ -378,6 +461,21 @@ export default function VoiceAssistant() {
                 <span className="font-semibold text-primary-600 uppercase tracking-wide text-[10px]">TriNetra</span>
                 <div className="mt-0.5 leading-relaxed">{lastAnswer}</div>
               </div>
+            )}
+
+            {/* Handoff to the detailed Ask TriNetra investigation — opens the
+                SAME conversation (never creates a new one) via the URL param. */}
+            {lastAnswer && conversationId && (
+              <button
+                onClick={() => navigate(`/ask?conversation_id=${encodeURIComponent(conversationId)}`)}
+                className="w-full flex items-center justify-between gap-2 text-[11px] font-semibold text-primary-900 bg-white border border-primary-200 hover:bg-primary-50 rounded-lg px-3 py-2 transition-colors"
+              >
+                <span>Need a more detailed investigation?</span>
+                <span className="flex items-center gap-1 text-accent-600">
+                  Continue in Ask TriNetra
+                  <span aria-hidden="true">→</span>
+                </span>
+              </button>
             )}
 
             {/* Whitelisted screen actions */}
