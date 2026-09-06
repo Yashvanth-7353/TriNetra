@@ -4,6 +4,7 @@ import AppShell from './components/layout/AppShell';
 // Public Pages
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
+import WhatsTriNetraPage from './pages/WhatsTriNetraPage';
 
 // Authenticated Pages
 import Dashboard from './pages/Dashboard';
@@ -25,6 +26,7 @@ function App() {
       {/* Public Routes */}
       <Route path="/" element={<LandingPage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/whats-trinetra" element={<WhatsTriNetraPage />} />
 
       {/* Authenticated Routes with AppShell */}
       <Route element={<AppShell />}>

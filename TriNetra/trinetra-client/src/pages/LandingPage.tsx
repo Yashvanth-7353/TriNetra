@@ -282,6 +282,10 @@ export default function LandingPage() {
               className="hidden sm:inline-flex items-center gap-1.5 text-[13px] font-semibold text-slate-600 hover:text-primary-900 transition-colors px-3 py-2 rounded-full hover:bg-slate-100/60">
               <Server className="w-4 h-4" /> Architecture
             </button>
+            <Link to="/whats-trinetra"
+              className="hidden sm:inline-flex items-center gap-1.5 text-[13px] font-semibold text-slate-600 hover:text-primary-900 transition-colors px-3 py-2 rounded-full hover:bg-slate-100/60">
+              <Sparkles className="w-4 h-4" /> What's TriNetra?
+            </Link>
             <Link to="/login"
               className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full font-medium text-[13px] text-white bg-primary-900 hover:bg-primary-800 transition-all duration-200 shadow-sm hover:shadow-md active:scale-[0.98]">
               <Lock className="w-3.5 h-3.5" /> Log In

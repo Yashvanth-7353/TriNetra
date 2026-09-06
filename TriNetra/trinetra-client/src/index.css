@@ -80,6 +80,56 @@
   }
 }
 
+/* ── Global TriNetra Scrollbar ───────────────────────────────
+   Applies everywhere (body + every nested scroll container) so the
+   scrollbar matches the product theme: navy thumb, light track,
+   rounded, thin, with a subtle hover deepening. Chromium uses the
+   ::-webkit-* rules; Firefox/Safari 18+ use the standard properties.
+*/
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-primary-400) var(--color-primary-50);
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--color-primary-50);
+  border-radius: 9999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--color-primary-400);
+  border-radius: 9999px;
+  border: 2px solid var(--color-primary-50);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-primary-600);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background-color: var(--color-primary-800);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Keep scrollbars functional and quiet inside code blocks/terminals. */
+pre, code {
+  scrollbar-width: thin;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *::-webkit-scrollbar-thumb {
+    transition: none;
+  }
+}
+
 /* ── Scroll Reveal Animations ── */
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(32px); }

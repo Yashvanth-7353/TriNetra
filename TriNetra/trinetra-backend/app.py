@@ -2,6 +2,8 @@ import os
 import time
 import json
 import re
+import logging
+import uuid
 from fastapi import FastAPI, HTTPException, Header, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -55,6 +57,17 @@ router_engine = IntentRouter()
 nl2sql_engine = NL2SQLEngine()
 rag_engine = RAGEngine()
 
+from engines import catalyst_chat_store as chat_persistence
+
+logger = logging.getLogger("trinetra.chat")
+try:
+    chat_store = chat_persistence.get_chat_store()
+except chat_persistence.ChatStoreError:
+    logger.error(
+        "chat_persistence store unavailable at startup - falling back to in-memory store"
+    )
+    chat_store = chat_persistence.InMemoryChatStore()
+
 # Hardened Browser CORS Boundary Profile Configurations
 app.add_middleware(
     CORSMiddleware,
@@ -64,6 +77,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Development-only request timing for the latency-sensitive endpoints
+# (dashboard analytics + voice pipeline). Logs durations only — never tokens,
+# audio content, or investigative payloads.
+perf_logger = logging.getLogger("trinetra.perf")
+_PERF_PREFIXES = (
+    "/api/analytics/summary", "/api/analytics/alerts", "/api/analytics/trends",
+    "/api/sarvam/stt", "/api/sarvam/tts", "/api/sarvam/translate",
+    "/api/chat", "/api/investigate",
+)
+
+
+@app.middleware("http")
+async def _perf_timing_middleware(request, call_next):
+    path = request.url.path
+    if request.method == "GET" or any(path.startswith(p) for p in _PERF_PREFIXES):
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        perf_logger.info("[PERF] %s %s total=%.0fms status=%s",
+                         request.method, path, elapsed_ms, response.status_code)
+        return response
+    return await call_next(request)
+
 class LoginRequest(BaseModel):
     employee_id: int
     password: str
@@ -71,6 +107,10 @@ class LoginRequest(BaseModel):
 class ChatRequest(BaseModel):
     query: str
     session_token: str = "local_node_dev_session"
+    # Persistent chat history: when present, the message and its context are
+    # stored in the Catalyst-backed conversation (ownership is verified
+    # server-side; the id alone never grants access).
+    conversation_id: Optional[str] = None
 
 
 def _extract_auth_context(authorization: Optional[str]) -> dict:
@@ -131,6 +171,194 @@ def _effective_district_scope(auth_ctx: dict, requested_district_id: Optional[in
     if _is_statewide_role(role):
         return requested_district_id
     return auth_ctx.get("district_id")
+
+
+# ── Persistent chat conversation helpers (Catalyst Data Store) ──────────
+
+def _resolve_conversation(conversation_id: str, employee_id: int) -> dict:
+    """Loads a conversation owned by ``employee_id``.
+
+    Ownership is verified server-side against the persisted messages
+    (``chat_messages.employee_id`` is written only from the authenticated
+    JWT identity). A malformed id is a 400; a conversation that does not
+    exist or belongs to another employee is a neutral 404 (never an
+    existence oracle); a store outage is a 503 so the caller knows the
+    persistence tier is down rather than silently continuing unowned.
+    """
+    if not chat_persistence._valid_uuid(conversation_id):
+        raise HTTPException(status_code=400, detail="Invalid conversation_id format.")
+    try:
+        conversation = chat_store.get_conversation(conversation_id, employee_id)
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning("chat_persistence ownership check failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Chat history store is unavailable. Please try again shortly.",
+        )
+    if conversation is None:
+        raise HTTPException(
+            status_code=404, detail="Conversation not found or not owned by you."
+        )
+    return conversation
+
+
+def _claim_conversation(conversation_id: str, employee_id: int) -> dict:
+    """Like _resolve_conversation, but an empty (ownerless) conversation is
+    returned so the first message can establish ownership. The conversation
+    row itself holds no data, so this cannot expose another employee's
+    content; once the first message exists, ownership is enforced strictly."""
+    if not chat_persistence._valid_uuid(conversation_id):
+        raise HTTPException(status_code=400, detail="Invalid conversation_id format.")
+    try:
+        conversation = chat_store.claim_or_get(conversation_id, employee_id)
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning("chat_persistence ownership check failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Chat history store is unavailable. Please try again shortly.",
+        )
+    if conversation is None:
+        raise HTTPException(
+            status_code=404, detail="Conversation not found or not owned by you."
+        )
+    return conversation
+
+
+def _restore_investigation_context(persisted: dict) -> dict:
+    """Rebuilds the in-memory investigation-context shape from a persisted
+    Catalyst row. Only structured IDs/scope are restored — never any data
+    that would bypass RBAC: the engines still enforce the caller's own
+    jurisdiction filter before touching records, and entities that are no
+    longer accessible simply resolve to nothing."""
+    if not persisted:
+        return None
+
+    def _as_ints(values):
+        out = []
+        for value in values or []:
+            try:
+                out.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    cases = _as_ints(persisted.get("case_ids"))
+    accused = _as_ints(persisted.get("accused_ids"))
+    engines = [
+        e.strip()
+        for e in (persisted.get("last_engines") or "").split(",")
+        if e.strip()
+    ]
+    scope = persisted.get("resolved_scope") or {}
+    return {
+        "plan": {
+            # Deliberately empty filters: persisted scope is context, never a
+            # broad query. Entities are seeded only for entity-first intents.
+            "filters": {
+                "crime_category": None,
+                "district_name": None,
+                "time_window": None,
+                "limit": None,
+            },
+            "engines": engines or ["investigation"],
+            "entities": {"case_ids": cases, "accused_ids": accused},
+            "resolved_scope": scope,
+        },
+        "resolved_scope": scope,
+        "discovered_cases": cases,
+        "discovered_accused": accused,
+        "timestamp": time.time(),
+    }
+
+
+def _engines_label(delegated_result: dict, target_engine: str) -> str:
+    """Deterministic engine label stored on messages: canonical intent alone
+    for single-engine answers, comma-joined engine list for multi-engine
+    delegations (e.g. 'case_query,criminal_network,financial_analysis')."""
+    if delegated_result is not None:
+        engines = (
+            (delegated_result.get("investigation") or {}).get("plan") or {}
+        ).get("engines") or []
+        if engines:
+            return ",".join(str(e) for e in engines)
+    return target_engine
+
+
+def _title_from_query(query: str) -> str:
+    """Deterministic conversation title from the first user message.
+    Prefers an FIR/Case number, then the first meaningful words of the
+    query. Never uses an LLM and never embeds secrets beyond what the
+    owner already typed."""
+    m = re.search(
+        r"\b(?:FIR|CrimeNo|CaseMasterID|Case No)\s*[:#-]?\s*(\d{6,})\b",
+        query, re.IGNORECASE,
+    )
+    if m:
+        return f"FIR {m.group(1)}"
+    skip = {
+        "show", "the", "what", "is", "are", "find", "me", "a", "an", "of",
+        "in", "for", "with", "and", "how", "do", "we", "has", "have", "to",
+        "recent", "cases", "case", "list", "all", "details", "get", "any",
+    }
+    words = [
+        w for w in re.findall(r"[A-Za-z][A-Za-z0-9'-]*", query)
+        if w.lower() not in skip
+    ][:4]
+    if not words:
+        return "New Investigation"
+    return " ".join(w.capitalize() for w in words)[:48]
+
+
+def _persist_chat_turn(conversation_id, employee_id, user_query: str,
+                       answer_text: str, final_intent: str, engines: str,
+                       stored_ctx: dict, current_title: str = None) -> None:
+    """Persists the assistant message, investigation context and conversation
+    metadata after a turn. Every failure is logged and swallowed: persistence
+    must never turn a successful investigation into an error response.
+
+    ``answer_text`` is the exact final response returned to the frontend
+    (deterministic facts are never regenerated or paraphrased on replay).
+    """
+    if not conversation_id:
+        return
+    try:
+        chat_store.save_message(
+            conversation_id, employee_id, "assistant", answer_text,
+            intent=final_intent, engine=engines,
+        )
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning(
+            "chat_persistence assistant message failed conversation=%s: %s",
+            conversation_id, exc,
+        )
+        return
+    if stored_ctx:
+        stored_ctx["last_intent"] = final_intent
+        stored_ctx["last_engines"] = engines
+        try:
+            chat_store.upsert_investigation_context(
+                conversation_id, employee_id, stored_ctx
+            )
+        except chat_persistence.ChatStoreError as exc:
+            logger.warning(
+                "chat_persistence context persist failed conversation=%s: %s",
+                conversation_id, exc,
+            )
+    updates = {
+        "last_intent": final_intent,
+        "last_activity_at": chat_persistence.utc_now_iso(),
+    }
+    if current_title in (None, "New Investigation"):
+        title = _title_from_query(user_query)
+        if title and title != "New Investigation":
+            updates["title"] = title
+    try:
+        chat_store.update_conversation(conversation_id, employee_id, updates)
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning(
+            "chat_persistence conversation update failed conversation=%s: %s",
+            conversation_id, exc,
+        )
 
 
 @app.post("/api/login")
@@ -676,6 +904,34 @@ def _extract_context_entities(investigation_result: dict):
     return list(dict.fromkeys(cases)), list(dict.fromkeys(accused))
 
 
+def _extract_transaction_ids(investigation_result: dict) -> list:
+    """Pulls discovered transaction identifiers out of a finished
+    investigation result (financial engine findings)."""
+    tids = []
+    for finding in investigation_result.get("investigation", {}).get("findings", []):
+        data = finding.get("data", {}) or {}
+        for rows in data.values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                tid = (row.get("txn_id") or row.get("transaction_id")
+                       or row.get("TransactionID"))
+                if tid:
+                    try:
+                        tids.append(int(tid))
+                    except (TypeError, ValueError):
+                        pass
+    plan = investigation_result.get("investigation", {}).get("plan", {}) or {}
+    for tid in (plan.get("entities", {}) or {}).get("transaction_ids", []) or []:
+        try:
+            tids.append(int(tid))
+        except (TypeError, ValueError):
+            pass
+    return list(dict.fromkeys(tids))
+
+
 def set_investigation_context(session_id: str, investigation_result: dict,
                               request_text: str = None, employee_id=None):
     """Stores the investigation result for multi-turn follow-up queries.
@@ -714,8 +970,10 @@ def set_investigation_context(session_id: str, investigation_result: dict,
         "resolved_scope": investigation_result.get("investigation", {}).get("plan", {}).get("resolved_scope"),
         "discovered_cases": cases,
         "discovered_accused": accused,
+        "discovered_transactions": _extract_transaction_ids(investigation_result),
         "timestamp": current_time,
     }
+    return session_store[session_id]["investigation"]
 
 
 def store_exact_case_context(session_id: str, exact_result: dict, employee_id=None):
@@ -751,8 +1009,10 @@ def store_exact_case_context(session_id: str, exact_result: dict, employee_id=No
         "resolved_scope": exact_result.get("scope") or {},
         "discovered_cases": discovered_cases,
         "discovered_accused": discovered_accused,
+        "discovered_transactions": [],
         "timestamp": current_time,
     }
+    return session_store[session_id]["investigation"]
 
 
 def _rbac_scope_label(rbac_filter: str, role: str) -> str:
@@ -815,11 +1075,56 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
     )
 
     try:
-        active_memory = access_context_memory(request.session_token, user_employee_id)
+        # ── Persistent conversation resolution (Catalyst Data Store) ──
+        # When a conversation_id is supplied, the persisted conversation,
+        # message history and investigation context are authoritative; the
+        # in-memory session key is namespaced per conversation so two
+        # conversations never share follow-up context. Ownership is verified
+        # server-side before anything else runs.
+        conversation = None
+        session_id = request.session_token
+        if request.conversation_id:
+            conversation = _claim_conversation(request.conversation_id, user_employee_id)
+            session_id = f"{request.session_token}:conv:{request.conversation_id}"
+            try:
+                restored_ctx = chat_store.get_investigation_context(
+                    request.conversation_id, user_employee_id
+                )
+            except chat_persistence.ChatStoreError as persist_err:
+                logger.warning(
+                    "chat_persistence context restore failed conversation=%s: %s",
+                    request.conversation_id, persist_err,
+                )
+                restored_ctx = None
+            try:
+                persisted_memory = chat_store.get_messages(
+                    request.conversation_id, user_employee_id, limit=12
+                )
+            except chat_persistence.ChatStoreError as persist_err:
+                logger.warning(
+                    "chat_persistence history restore failed conversation=%s: %s",
+                    request.conversation_id, persist_err,
+                )
+                persisted_memory = []
+
+        active_memory = access_context_memory(session_id, user_employee_id)
+        if conversation is not None:
+            # Rebuild the LLM-visible history from persisted messages so a
+            # reopened conversation reads exactly like the previous session.
+            active_memory = [
+                {
+                    "role": m.get("role") if m.get("role") in ("user", "assistant") else "user",
+                    "text": m.get("content", ""),
+                }
+                for m in persisted_memory
+            ]
         # Pass the previous investigation context so follow-ups like
         # "show the financial trail" are classified as context-requiring
         # intents (never a broad case search).
-        inv_ctx = get_investigation_context(request.session_token, user_employee_id)
+        inv_ctx = get_investigation_context(session_id, user_employee_id)
+        if conversation is not None:
+            inv_ctx = _restore_investigation_context(restored_ctx)
+        stored_ctx = None
         standalone_q = request.query
 
         # Deterministic follow-up detection: when the RAW user query refers
@@ -843,6 +1148,21 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 
         intent_profile = router_engine.classify_intent(standalone_q, investigation_context=inv_ctx)
         target_engine = intent_profile["engine"]
+
+        # Persist the user message before the investigation runs so a later
+        # failure never loses the user's own words. The intent is stored when
+        # classification succeeded; persistence failures are logged, never fatal.
+        if conversation is not None:
+            try:
+                chat_store.save_message(
+                    request.conversation_id, user_employee_id, "user",
+                    request.query, intent=intent_profile.get("engine"),
+                )
+            except chat_persistence.ChatStoreError as persist_err:
+                logger.warning(
+                    "chat_persistence user message failed conversation=%s: %s",
+                    request.conversation_id, persist_err,
+                )
 
         answer_text = ""
         citations_array = []
@@ -872,7 +1192,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
             lookup_scope = exact_result.get("scope")
             target_engine = "exact_case_lookup"
             # Keep the exact FIR as investigation context for follow-ups
-            store_exact_case_context(request.session_token, exact_result, user_employee_id)
+            stored_ctx = store_exact_case_context(session_id, exact_result, user_employee_id)
 
         # ── Multi-engine analysis intents ──
         # Pattern / MO-similarity / financial / network / trend / forecasting /
@@ -900,8 +1220,9 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 analytics_engine=analytics_engine,
                 case_explorer_engine=case_explorer_engine,
             )
-            set_investigation_context(request.session_token, delegated_result,
-                                      request_text=standalone_q, employee_id=user_employee_id)
+            stored_ctx = set_investigation_context(session_id, delegated_result,
+                                                   request_text=standalone_q,
+                                                   employee_id=user_employee_id)
             target_engine = delegated_result.get("intent_detected") or target_engine
             answer_text = delegated_result.get("answer", "")
             citations_array = delegated_result.get("citations", [])
@@ -1079,6 +1400,21 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
         active_memory.append({"role": "user", "text": request.query})
         active_memory.append({"role": "assistant", "text": answer_text})
 
+        # Persist the final assistant answer + context + metadata. The stored
+        # answer is exactly what the frontend received (deterministic exact-FIR
+        # facts are stored verbatim, never regenerated on replay).
+        if conversation is not None:
+            _persist_chat_turn(
+                conversation_id=request.conversation_id,
+                employee_id=user_employee_id,
+                user_query=request.query,
+                answer_text=answer_text,
+                final_intent=target_engine,
+                engines=_engines_label(delegated_result, target_engine),
+                stored_ctx=stored_ctx,
+                current_title=conversation.get("title"),
+            )
+
         if delegated_result is not None:
             # Multi-engine delegation returns the full investigation payload
             # (plan, findings, evidence inventory, routing log, graph/analytics).
@@ -1109,6 +1445,8 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
                 ]
             }
         }
+    except HTTPException:
+        raise
     except Exception as server_error:
         raise HTTPException(status_code=500, detail=str(server_error))
 
@@ -1119,6 +1457,7 @@ async def handle_chat(request: ChatRequest, authorization: Optional[str] = Heade
 class InvestigateRequest(BaseModel):
     query: str
     session_token: str = "local_node_dev_session"
+    conversation_id: Optional[str] = None
 
 @app.post("/api/investigate")
 async def handle_investigate(request: InvestigateRequest, authorization: Optional[str] = Header(None)):
@@ -1145,8 +1484,49 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
 
     try:
         # 2. Get conversation context for multi-turn investigations
-        conversation_history = access_context_memory(request.session_token, user_employee_id)
-        investigation_context = get_investigation_context(request.session_token, user_employee_id)
+        #    (persisted conversation when conversation_id is supplied)
+        conversation = None
+        session_id = request.session_token
+        restored_ctx = None
+        persisted_memory = []
+        if request.conversation_id:
+            conversation = _claim_conversation(request.conversation_id, user_employee_id)
+            session_id = f"{request.session_token}:conv:{request.conversation_id}"
+            try:
+                restored_ctx = chat_store.get_investigation_context(
+                    request.conversation_id, user_employee_id
+                )
+                persisted_memory = chat_store.get_messages(
+                    request.conversation_id, user_employee_id, limit=12
+                )
+            except chat_persistence.ChatStoreError as persist_err:
+                logger.warning(
+                    "chat_persistence restore failed conversation=%s: %s",
+                    request.conversation_id, persist_err,
+                )
+        conversation_history = access_context_memory(session_id, user_employee_id)
+        if conversation is not None:
+            conversation_history = [
+                {
+                    "role": m.get("role") if m.get("role") in ("user", "assistant") else "user",
+                    "text": m.get("content", ""),
+                }
+                for m in persisted_memory
+            ]
+        investigation_context = get_investigation_context(session_id, user_employee_id)
+        if conversation is not None:
+            investigation_context = _restore_investigation_context(restored_ctx) or investigation_context
+        if conversation is not None:
+            try:
+                chat_store.save_message(
+                    request.conversation_id, user_employee_id, "user",
+                    request.query,
+                )
+            except chat_persistence.ChatStoreError as persist_err:
+                logger.warning(
+                    "chat_persistence user message failed conversation=%s: %s",
+                    request.conversation_id, persist_err,
+                )
 
         # Build extended history including investigation context
         extended_history = list(conversation_history)
@@ -1179,7 +1559,9 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
         )
 
         # 4. Store investigation context for multi-turn follow-up
-        set_investigation_context(request.session_token, result, request_text=request.query, employee_id=user_employee_id)
+        stored_ctx = set_investigation_context(session_id, result,
+                                               request_text=request.query,
+                                               employee_id=user_employee_id)
 
         # 5. Log to conversation history and audit
         active_memory = access_context_memory(request.session_token, user_employee_id)
@@ -1196,10 +1578,107 @@ async def handle_investigate(request: InvestigateRequest, authorization: Optiona
             row_count=len(result.get("citations", []))
         )
 
+        if conversation is not None:
+            _persist_chat_turn(
+                conversation_id=request.conversation_id,
+                employee_id=user_employee_id,
+                user_query=request.query,
+                answer_text=result.get("answer", ""),
+                final_intent=result.get("intent_detected") or "investigation",
+                engines=_engines_label(result, result.get("intent_detected") or "investigation"),
+                stored_ctx=stored_ctx,
+                current_title=conversation.get("title"),
+            )
+
         return result
 
+    except HTTPException:
+        raise
     except Exception as server_error:
         raise HTTPException(status_code=500, detail=str(server_error))
+
+
+# ──────────────────────────────────────────────
+#  Persistent Chat Conversations (Catalyst Data Store)
+# ──────────────────────────────────────────────
+# Every endpoint derives the employee from the JWT and verifies conversation
+# ownership server-side. Knowing a conversation_id never grants access; a
+# foreign or missing conversation is an identical neutral 404.
+
+@app.get("/api/chat/conversations")
+async def list_conversations(authorization: Optional[str] = Header(None)):
+    """Lists conversations belonging to the authenticated employee only."""
+    auth_ctx = _require_auth(authorization)
+    try:
+        conversations = chat_store.get_conversations_for_employee(
+            auth_ctx["employee_id"], limit=100
+        )
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning("chat_persistence list failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Chat history store is unavailable.")
+    return {"status": "success", "conversations": conversations}
+
+
+@app.post("/api/chat/conversations")
+async def create_conversation(authorization: Optional[str] = Header(None)):
+    """Creates a new empty conversation owned by the authenticated employee.
+    The id is a random UUIDv4 — never a predictable sequential id."""
+    auth_ctx = _require_auth(authorization)
+    conversation_id = str(uuid.uuid4())
+    try:
+        conversation = chat_store.create_conversation(
+            conversation_id, auth_ctx["employee_id"], "New Investigation"
+        )
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning("chat_persistence create failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Chat history store is unavailable.")
+    return {"status": "success", "conversation": conversation}
+
+
+@app.get("/api/chat/conversations/{conversation_id}")
+async def get_conversation_detail(conversation_id: str,
+                                  authorization: Optional[str] = Header(None)):
+    """Returns a conversation with its messages (chronological, bounded) and
+    persisted investigation context — only for the owning employee."""
+    auth_ctx = _require_auth(authorization)
+    conversation = _resolve_conversation(conversation_id, auth_ctx["employee_id"])
+    try:
+        messages = chat_store.get_messages(
+            conversation_id, auth_ctx["employee_id"], limit=100
+        )
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning("chat_persistence messages failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Chat history store is unavailable.")
+    try:
+        investigation_context = chat_store.get_investigation_context(
+            conversation_id, auth_ctx["employee_id"]
+        )
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning("chat_persistence context read failed: %s", exc)
+        investigation_context = None
+    return {
+        "status": "success",
+        "conversation": conversation,
+        "messages": messages,
+        "investigation_context": investigation_context,
+    }
+
+
+@app.delete("/api/chat/conversations/{conversation_id}")
+async def delete_conversation_endpoint(conversation_id: str,
+                                       authorization: Optional[str] = Header(None)):
+    """Deletes a conversation (messages + context + conversation row) for the
+    owning employee only."""
+    auth_ctx = _require_auth(authorization)
+    _resolve_conversation(conversation_id, auth_ctx["employee_id"])
+    try:
+        deleted = chat_store.delete_conversation(
+            conversation_id, auth_ctx["employee_id"]
+        )
+    except chat_persistence.ChatStoreError as exc:
+        logger.warning("chat_persistence delete failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Chat history store is unavailable.")
+    return {"status": "success", "deleted": deleted}
 
 
 # ──────────────────────────────────────────────
@@ -1612,6 +2091,11 @@ class SarvamTranslateRequest(BaseModel):
     source_language: str = "kn-IN"
     target_language: str = "en-IN"
 
+
+class SarvamTTSRequest(BaseModel):
+    text: str
+    language_code: str = "en-IN"
+
 @app.post("/api/sarvam/stt")
 async def sarvam_speech_to_text(
     file: UploadFile = File(...),
@@ -1630,6 +2114,28 @@ async def sarvam_speech_to_text(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sarvam STT failed: {str(e)}")
+
+@app.post("/api/sarvam/tts")
+async def sarvam_text_to_speech_endpoint(
+    req: SarvamTTSRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Converts text to speech (base64 WAV) using Sarvam AI TTS.
+    Authenticated: the Voice Copilot speaks only through this boundary; the
+    browser never calls Sarvam directly."""
+    _require_auth(authorization)
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="Empty text provided for speech synthesis.")
+    try:
+        res = sarvam_engine.text_to_speech(text=req.text, language_code=req.language_code)
+        if "error" in res:
+            raise HTTPException(status_code=500, detail=res["error"])
+        return {"status": "success", "audio_base64": res["audio_base64"], "audio_format": res["audio_format"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sarvam TTS failed: {str(e)}")
+
 
 @app.post("/api/sarvam/translate")
 async def sarvam_translate(

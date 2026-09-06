@@ -369,7 +369,7 @@ const CustomNode = ({ data }: any) => {
       style={{ cursor: 'pointer' }}
     >
       {data.targetHandle && (
-        <Handle type="target" position={data.targetPosition || Position.Top} className="!bg-slate-400 !w-2.5 !h-2.5 !border-2 !border-white" />
+        <Handle id="top" type="target" position={data.targetPosition || Position.Top} className="!bg-slate-400 !w-2.5 !h-2.5 !border-2 !border-white" />
       )}
 
       <div className="flex flex-col items-center justify-center gap-1.5">
@@ -388,7 +388,7 @@ const CustomNode = ({ data }: any) => {
       </div>
 
       {data.sourceHandle && (
-        <Handle type="source" position={data.sourcePosition || Position.Bottom} className="!bg-slate-400 !w-2.5 !h-2.5 !border-2 !border-white" />
+        <Handle id="bottom" type="source" position={data.sourcePosition || Position.Bottom} className="!bg-slate-400 !w-2.5 !h-2.5 !border-2 !border-white" />
       )}
       {data.leftHandle && (
         <Handle id="left" type="source" position={Position.Left} className="!bg-slate-400 !w-2.5 !h-2.5 !border-2 !border-white" />
@@ -405,6 +405,12 @@ const GroupNode = ({ data }: any) => {
     <div
       className={`w-full h-full rounded-2xl border-2 border-dashed ${data.borderColor} ${data.bgColor || 'bg-slate-50'} relative p-4`}
     >
+      {data.targetHandle && (
+        <Handle id="top" type="target" position={Position.Top} className="!bg-slate-400 !w-2.5 !h-2.5 !border-2 !border-white" />
+      )}
+      {data.sourceHandle && (
+        <Handle id="bottom" type="source" position={Position.Bottom} className="!bg-slate-400 !w-2.5 !h-2.5 !border-2 !border-white" />
+      )}
       <div className={`absolute -top-3 left-4 px-2 bg-white font-bold text-[11px] tracking-wide uppercase ${data.textColor} flex items-center gap-1.5`}>
         {data.icon && <data.icon className="w-3.5 h-3.5" />}
         {data.label}
@@ -422,11 +428,11 @@ const DetailNode = ({ data }: any) => {
   return (
     <div className="px-2.5 py-1.5 bg-slate-50 rounded-md border border-slate-200 min-w-[100px] shadow-sm flex flex-col justify-center items-center hover:bg-slate-100 transition-colors">
       {data.targetHandle && (
-        <Handle type="target" position={data.targetPosition || Position.Top} className="!bg-slate-300 !w-1.5 !h-1.5" />
+        <Handle id="top" type="target" position={data.targetPosition || Position.Top} className="!bg-slate-300 !w-1.5 !h-1.5" />
       )}
       <div className="text-[9px] font-semibold text-slate-600 text-center leading-tight">{data.label}</div>
       {data.sourceHandle && (
-        <Handle type="source" position={data.sourcePosition || Position.Bottom} className="!bg-slate-300 !w-1.5 !h-1.5" />
+        <Handle id="bottom" type="source" position={data.sourcePosition || Position.Bottom} className="!bg-slate-300 !w-1.5 !h-1.5" />
       )}
     </div>
   );
@@ -495,6 +501,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       position: { x: 25, y: 130 },
       style: { width: 1300, height: 320 },
       data: {
+        targetHandle: true,
         label: 'TriNetra Frontend',
         icon: Globe,
         borderColor: 'border-sky-300',
@@ -530,8 +537,10 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'frontend-group',
       extent: 'parent',
       data: {
-        label: 'Voice & Translation',
-        sublabel: 'Sarvam AI STT',
+        leftHandle: true,
+        rightHandle: true,
+        label: 'Voice Copilot',
+        sublabel: 'STT / TTS / Translation',
         icon: Mic,
         iconColor: 'text-rose-500',
         borderColor: 'border-rose-200',
@@ -583,6 +592,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
         borderColor: 'border-indigo-300',
         textColor: 'text-indigo-600',
         bgColor: 'bg-indigo-50/30',
+        targetHandle: true,
       },
     },
     { id: 'api-auth', type: 'detailNode', position: { x: 20, y: 35 }, parentNode: 'api-group', extent: 'parent', data: { label: 'POST /api/login' } },
@@ -598,8 +608,26 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
     { id: 'api-nba', type: 'detailNode', position: { x: 770, y: 35 }, parentNode: 'api-group', extent: 'parent', data: { label: 'POST /api/investigation/next-actions' } },
     { id: 'api-forecast', type: 'detailNode', position: { x: 770, y: 85 }, parentNode: 'api-group', extent: 'parent', data: { label: 'GET /api/forecast*' } },
     { id: 'api-financial', type: 'detailNode', position: { x: 920, y: 35 }, parentNode: 'api-group', extent: 'parent', data: { label: 'POST /api/financial/analyze' } },
-    { id: 'api-sarvam', type: 'detailNode', position: { x: 920, y: 85 }, parentNode: 'api-group', extent: 'parent', data: { label: 'POST /api/sarvam/*' } },
+    { id: 'api-sarvam', type: 'detailNode', position: { x: 920, y: 85 }, parentNode: 'api-group', extent: 'parent', data: { label: 'POST /api/sarvam/stt | tts | translate' } },
     { id: 'api-export', type: 'detailNode', position: { x: 1070, y: 35 }, parentNode: 'api-group', extent: 'parent', data: { label: 'POST /api/chat/export' } },
+    { id: 'api-conversations', type: 'detailNode', position: { x: 1070, y: 85 }, parentNode: 'api-group', extent: 'parent', data: { label: 'POST /api/chat/conversations' } },
+
+    {
+      id: 'conv-node',
+      type: 'customNode',
+      position: { x: 1255, y: 505 },
+      data: {
+        label: 'Shared Conversation Context',
+        sublabel: 'One conversation per login',
+        icon: MessagesSquare,
+        iconColor: 'text-indigo-600',
+        borderColor: 'border-indigo-300',
+        targetHandle: true,
+        sourceHandle: true,
+        leftHandle: true,
+        rightHandle: true,
+      },
+    },
 
     // ════════════════════════════════════════════════
     // LAYER 4: SECURITY & GOVERNANCE
@@ -610,6 +638,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       position: { x: 175, y: 740 },
       style: { width: 1000, height: 180 },
       data: {
+        targetHandle: true,
         label: 'Security & Governance',
         icon: ShieldCheck,
         borderColor: 'border-emerald-300',
@@ -652,10 +681,18 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
         rightHandle: true,
       },
     },
-    { id: 'rbac-1', type: 'detailNode', position: { x: 300, y: 115 }, parentNode: 'auth-pipeline', extent: 'parent', data: { label: 'Investigator → Station' } },
-    { id: 'rbac-2', type: 'detailNode', position: { x: 300, y: 145 }, parentNode: 'auth-pipeline', extent: 'parent', data: { label: 'Supervisor → District' } },
-    { id: 'rbac-3', type: 'detailNode', position: { x: 510, y: 115 }, parentNode: 'auth-pipeline', extent: 'parent', data: { label: 'Analyst → State-wide' } },
-    { id: 'rbac-4', type: 'detailNode', position: { x: 510, y: 145 }, parentNode: 'auth-pipeline', extent: 'parent', data: { label: 'Policymaker → State-wide' } },
+    { id: 'rbac-1', type: 'detailNode', position: { x: 300, y: 115 }, parentNode: 'auth-pipeline', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Investigator → Station' } },
+    { id: 'rbac-2', type: 'detailNode', position: { x: 300, y: 145 }, parentNode: 'auth-pipeline', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Supervisor → District' } },
+    { id: 'rbac-3', type: 'detailNode', position: { x: 510, y: 115 }, parentNode: 'auth-pipeline', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Analyst → State-wide' } },
+    { id: 'rbac-4', type: 'detailNode', position: { x: 510, y: 145 }, parentNode: 'auth-pipeline', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Policymaker → State-wide' } },
     {
       id: 'audit',
       type: 'customNode',
@@ -701,6 +738,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       position: { x: 25, y: 980 },
       style: { width: 1300, height: 220 },
       data: {
+        targetHandle: true,
         label: 'Investigation Orchestrator',
         icon: BrainCircuit,
         borderColor: 'border-violet-400',
@@ -715,6 +753,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'orchestrator',
       extent: 'parent',
       data: {
+        rightHandle: true,
         label: 'NL Understanding',
         sublabel: 'LLM Plan Generation',
         icon: Brain,
@@ -731,6 +770,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'orchestrator',
       extent: 'parent',
       data: {
+        rightHandle: true,
         label: 'Scope Resolution',
         sublabel: 'DB-ID Mapping',
         icon: Search,
@@ -747,6 +787,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'orchestrator',
       extent: 'parent',
       data: {
+        rightHandle: true,
         label: 'Engine Selection',
         sublabel: '8 Valid Engines',
         icon: Cog,
@@ -763,6 +804,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'orchestrator',
       extent: 'parent',
       data: {
+        rightHandle: true,
         label: 'Parallel Execution',
         sublabel: 'Multi-Engine Pipeline',
         icon: Zap,
@@ -779,6 +821,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'orchestrator',
       extent: 'parent',
       data: {
+        rightHandle: true,
         label: 'Evidence Fusion',
         sublabel: 'Cross-Engine Synthesis',
         icon: Layers,
@@ -795,6 +838,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'orchestrator',
       extent: 'parent',
       data: {
+        rightHandle: true,
         label: 'NL Response',
         sublabel: 'LLM Summary',
         icon: MessagesSquare,
@@ -821,12 +865,24 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       },
     },
     // Sub-label row
-    { id: 'orch-l1', type: 'detailNode', position: { x: 50, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { label: 'Conversation History' } },
-    { id: 'orch-l2', type: 'detailNode', position: { x: 230, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { label: 'CrimeHead/District Mapping' } },
-    { id: 'orch-l3', type: 'detailNode', position: { x: 410, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { label: 'case_query, rag, network, ...' } },
-    { id: 'orch-l4', type: 'detailNode', position: { x: 590, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { label: 'Engines run independently' } },
-    { id: 'orch-l5', type: 'detailNode', position: { x: 770, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { label: 'Strength scoring, deduplication' } },
-    { id: 'orch-l6', type: 'detailNode', position: { x: 950, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { label: 'Evidence-grounded text' } },
+    { id: 'orch-l1', type: 'detailNode', position: { x: 50, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Conversation History' } },
+    { id: 'orch-l2', type: 'detailNode', position: { x: 230, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'CrimeHead/District Mapping' } },
+    { id: 'orch-l3', type: 'detailNode', position: { x: 410, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'case_query, rag, network, ...' } },
+    { id: 'orch-l4', type: 'detailNode', position: { x: 590, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Engines run independently' } },
+    { id: 'orch-l5', type: 'detailNode', position: { x: 770, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Strength scoring, deduplication' } },
+    { id: 'orch-l6', type: 'detailNode', position: { x: 950, y: 140 }, parentNode: 'orchestrator', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Evidence-grounded text' } },
 
     // ════════════════════════════════════════════════
     // LAYER 6: INTELLIGENCE ENGINES
@@ -837,6 +893,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       position: { x: 25, y: 1250 },
       style: { width: 1300, height: 520 },
       data: {
+        targetHandle: true,
         label: 'Intelligence & Analytics Engines',
         icon: BrainCircuit,
         borderColor: 'border-amber-400',
@@ -853,7 +910,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       style: { width: 620, height: 300 },
       parentNode: 'engines-group',
       extent: 'parent',
-      data: { label: 'Query Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' },
+      data: { label: 'Query Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' , targetHandle: true },
     },
     {
       id: 'engine-nl2sql',
@@ -874,7 +931,9 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
     { id: 'det-nl1', type: 'detailNode', position: { x: 15, y: 130 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'Schema-aware Prompt' } },
     { id: 'det-nl2', type: 'detailNode', position: { x: 15, y: 160 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'SQL Generation (LLM)' } },
     { id: 'det-nl3', type: 'detailNode', position: { x: 15, y: 190 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'RBAC WHERE Injection' } },
-    { id: 'det-nl4', type: 'detailNode', position: { x: 15, y: 220 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'Validate & Execute' } },
+    { id: 'det-nl4', type: 'detailNode', position: { x: 15, y: 220 }, parentNode: 'query-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'Validate & Execute' } },
 
     {
       id: 'engine-ce',
@@ -894,7 +953,9 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
     },
     { id: 'det-ce1', type: 'detailNode', position: { x: 210, y: 130 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'Paginated Search + Filters' } },
     { id: 'det-ce2', type: 'detailNode', position: { x: 210, y: 160 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'Case Detail + Timeline' } },
-    { id: 'det-ce3', type: 'detailNode', position: { x: 210, y: 190 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'Accused / Victims / Chargesheet' } },
+    { id: 'det-ce3', type: 'detailNode', position: { x: 210, y: 190 }, parentNode: 'query-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'Accused / Victims / Chargesheet' } },
 
     {
       id: 'engine-rag',
@@ -912,8 +973,12 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
         sourceHandle: true,
       },
     },
-    { id: 'det-rag1', type: 'detailNode', position: { x: 410, y: 130 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'Query Embedding (Gemini)' } },
-    { id: 'det-rag2', type: 'detailNode', position: { x: 410, y: 160 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'pgvector Cosine Search' } },
+    { id: 'det-rag1', type: 'detailNode', position: { x: 410, y: 130 }, parentNode: 'query-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'Query Embedding (Gemini)' } },
+    { id: 'det-rag2', type: 'detailNode', position: { x: 410, y: 160 }, parentNode: 'query-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'pgvector Cosine Search' } },
     { id: 'det-rag3', type: 'detailNode', position: { x: 410, y: 190 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'Top-k Narrative Retrieval' } },
     { id: 'det-rag4', type: 'detailNode', position: { x: 410, y: 220 }, parentNode: 'query-engines', extent: 'parent', data: { label: 'LLM Answer + Citations' } },
 
@@ -925,7 +990,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       style: { width: 310, height: 240 },
       parentNode: 'engines-group',
       extent: 'parent',
-      data: { label: 'Pattern & Case Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' },
+      data: { label: 'Pattern & Case Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' , targetHandle: true },
     },
     {
       id: 'engine-pattern',
@@ -944,7 +1009,9 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       },
     },
     { id: 'det-pat1', type: 'detailNode', position: { x: 15, y: 130 }, parentNode: 'pattern-engines', extent: 'parent', data: { label: 'Emerging MO Clusters (90d)' } },
-    { id: 'det-pat2', type: 'detailNode', position: { x: 15, y: 160 }, parentNode: 'pattern-engines', extent: 'parent', data: { label: 'Case Similarity (pgvector + MO)' } },
+    { id: 'det-pat2', type: 'detailNode', position: { x: 15, y: 160 }, parentNode: 'pattern-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'Case Similarity (pgvector + MO)' } },
     { id: 'det-pat3', type: 'detailNode', position: { x: 15, y: 190 }, parentNode: 'pattern-engines', extent: 'parent', data: { label: 'Geo-Temporal Composite Score' } },
 
     // --- Network & Relationship Intelligence ---
@@ -955,7 +1022,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       style: { width: 290, height: 240 },
       parentNode: 'engines-group',
       extent: 'parent',
-      data: { label: 'Network Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' },
+      data: { label: 'Network Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' , targetHandle: true },
     },
     {
       id: 'engine-network',
@@ -973,7 +1040,9 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
         sourceHandle: true,
       },
     },
-    { id: 'det-net1', type: 'detailNode', position: { x: 15, y: 130 }, parentNode: 'network-engines', extent: 'parent', data: { label: 'Multi-hop Traversal (1–3)' } },
+    { id: 'det-net1', type: 'detailNode', position: { x: 15, y: 130 }, parentNode: 'network-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'Multi-hop Traversal (1–3)' } },
     { id: 'det-net2', type: 'detailNode', position: { x: 15, y: 160 }, parentNode: 'network-engines', extent: 'parent', data: { label: 'Louvain Community Detection' } },
     { id: 'det-net3', type: 'detailNode', position: { x: 15, y: 190 }, parentNode: 'network-engines', extent: 'parent', data: { label: 'ReactFlow Graph Output' } },
 
@@ -985,7 +1054,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       style: { width: 420, height: 160 },
       parentNode: 'engines-group',
       extent: 'parent',
-      data: { label: 'Analytics & Risk', borderColor: 'border-amber-200', textColor: 'text-amber-600' },
+      data: { label: 'Analytics & Risk', borderColor: 'border-amber-200', textColor: 'text-amber-600' , targetHandle: true },
     },
     {
       id: 'engine-analytics',
@@ -1003,7 +1072,9 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
         sourceHandle: true,
       },
     },
-    { id: 'det-ana1', type: 'detailNode', position: { x: 15, y: 110 }, parentNode: 'analytics-engines', extent: 'parent', data: { label: 'KPIs / Hotspots / Trends' } },
+    { id: 'det-ana1', type: 'detailNode', position: { x: 15, y: 110 }, parentNode: 'analytics-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'KPIs / Hotspots / Trends' } },
     { id: 'det-ana2', type: 'detailNode', position: { x: 15, y: 135 }, parentNode: 'analytics-engines', extent: 'parent', data: { label: 'Demographics / Reporting Lag' } },
     {
       id: 'engine-risk',
@@ -1032,7 +1103,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       style: { width: 420, height: 160 },
       parentNode: 'engines-group',
       extent: 'parent',
-      data: { label: 'Financial Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' },
+      data: { label: 'Financial Intelligence', borderColor: 'border-amber-200', textColor: 'text-amber-600' , targetHandle: true },
     },
     {
       id: 'engine-financial',
@@ -1051,7 +1122,9 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       },
     },
     { id: 'det-fin1', type: 'detailNode', position: { x: 15, y: 110 }, parentNode: 'financial-engines', extent: 'parent', data: { label: 'Transaction Chain Detection' } },
-    { id: 'det-fin2', type: 'detailNode', position: { x: 15, y: 135 }, parentNode: 'financial-engines', extent: 'parent', data: { label: 'Cross-Case Financial Links' } },
+    { id: 'det-fin2', type: 'detailNode', position: { x: 15, y: 135 }, parentNode: 'financial-engines', extent: 'parent', data: { 
+      sourceHandle: true,
+      label: 'Cross-Case Financial Links' } },
     {
       id: 'engine-finleads',
       type: 'customNode',
@@ -1079,7 +1152,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       style: { width: 380, height: 160 },
       parentNode: 'engines-group',
       extent: 'parent',
-      data: { label: 'Investigation Support', borderColor: 'border-amber-200', textColor: 'text-amber-600' },
+      data: { label: 'Investigation Support', borderColor: 'border-amber-200', textColor: 'text-amber-600' , targetHandle: true },
     },
     {
       id: 'engine-evidence-graph',
@@ -1125,6 +1198,8 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       position: { x: 25, y: 1830 },
       style: { width: 1300, height: 140 },
       data: {
+        targetHandle: true,
+        sourceHandle: true,
         label: 'Evidence & Explainability',
         icon: Eye,
         borderColor: 'border-teal-400',
@@ -1218,6 +1293,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'ai-group',
       extent: 'parent',
       data: {
+        sourceHandle: true,
         label: 'Groq LLM',
         sublabel: 'gpt-oss-120b',
         icon: Bot,
@@ -1226,10 +1302,21 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
         targetHandle: true,
       },
     },
-    { id: 'ai-g1', type: 'detailNode', position: { x: 20, y: 130 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'Intent Classification' } },
-    { id: 'ai-g2', type: 'detailNode', position: { x: 20, y: 160 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'NL2SQL Generation' } },
-    { id: 'ai-g3', type: 'detailNode', position: { x: 20, y: 190 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'Investigation Planning' } },
-    { id: 'ai-g4', type: 'detailNode', position: { x: 20, y: 220 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'Response Synthesis' } },
+    { id: 'ai-g1', type: 'detailNode', position: { x: 20, y: 130 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      sourceHandle: true,
+      label: 'Intent Classification' } },
+    { id: 'ai-g2', type: 'detailNode', position: { x: 20, y: 160 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      sourceHandle: true,
+      label: 'NL2SQL Generation' } },
+    { id: 'ai-g3', type: 'detailNode', position: { x: 20, y: 190 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      sourceHandle: true,
+      label: 'Investigation Planning' } },
+    { id: 'ai-g4', type: 'detailNode', position: { x: 20, y: 220 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Response Synthesis' } },
 
     {
       id: 'ai-gemini',
@@ -1238,6 +1325,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'ai-group',
       extent: 'parent',
       data: {
+        sourceHandle: true,
         label: 'Google Gemini',
         sublabel: 'Embeddings',
         icon: Bot,
@@ -1246,8 +1334,13 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
         targetHandle: true,
       },
     },
-    { id: 'ai-ge1', type: 'detailNode', position: { x: 190, y: 130 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'Query Embedding Gen' } },
-    { id: 'ai-ge2', type: 'detailNode', position: { x: 190, y: 160 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'Case Similarity Vectors' } },
+    { id: 'ai-ge1', type: 'detailNode', position: { x: 190, y: 130 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      sourceHandle: true,
+      label: 'Query Embedding Gen' } },
+    { id: 'ai-ge2', type: 'detailNode', position: { x: 190, y: 160 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Case Similarity Vectors' } },
 
     {
       id: 'ai-sarvam',
@@ -1256,17 +1349,27 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       parentNode: 'ai-group',
       extent: 'parent',
       data: {
+        sourceHandle: true,
         label: 'Sarvam AI',
-        sublabel: 'STT + Translation',
+        sublabel: 'STT + TTS + Translation',
         icon: Mic,
         iconColor: 'text-purple-600',
         borderColor: 'border-purple-300',
         targetHandle: true,
       },
     },
-    { id: 'ai-sa1', type: 'detailNode', position: { x: 360, y: 130 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'saaras:v3 Speech-to-Text' } },
-    { id: 'ai-sa2', type: 'detailNode', position: { x: 360, y: 160 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'sarvam-translate:v1' } },
-    { id: 'ai-sa3', type: 'detailNode', position: { x: 360, y: 190 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'Kannada ↔ English' } },
+    { id: 'ai-sa1', type: 'detailNode', position: { x: 360, y: 130 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      sourceHandle: true,
+      label: 'saaras:v3 Speech-to-Text' } },
+    { id: 'ai-sa2', type: 'detailNode', position: { x: 360, y: 160 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      sourceHandle: true,
+      label: 'sarvam-translate:v1' } },
+    { id: 'ai-sa3', type: 'detailNode', position: { x: 360, y: 190 }, parentNode: 'ai-group', extent: 'parent', data: { 
+      targetHandle: true,
+      label: 'Kannada ↔ English' } },
+    { id: 'ai-sa4', type: 'detailNode', position: { x: 360, y: 220 }, parentNode: 'ai-group', extent: 'parent', data: { label: 'bulbul:v3 Text-to-Speech' } },
 
     // ════════════════════════════════════════════════
     // LAYER 9: CATALYST — IN PROGRESS
@@ -1277,6 +1380,7 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       position: { x: 25, y: 2380 },
       style: { width: 1300, height: 190 },
       data: {
+        targetHandle: true,
         label: 'Zoho Catalyst',
         icon: Cloud,
         borderColor: 'border-orange-300',
@@ -1424,6 +1528,16 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
 
       // ── Frontend internal ──
       { id: 'e-fe-voice', source: 'fe-voice', sourceHandle: 'bottom', target: 'fe-api', targetHandle: 'top', ...internalEdge },
+      { id: 'e-fe-conv', source: 'fe-voice', sourceHandle: 'right', target: 'conv-node', targetHandle: 'left', ...internalEdge,
+        label: 'conversation_id', labelStyle: { fill: '#6366f1', fontSize: 9 }, labelBgStyle: { fill: '#ffffff', fillOpacity: 0.9 } },
+      { id: 'e-conv-api', source: 'conv-node', sourceHandle: 'bottom', target: 'api-group', targetHandle: 'top', ...internalEdge,
+        label: 'chat_conversations / chat_messages / investigation_context', labelStyle: { fill: '#6366f1', fontSize: 8 },
+        labelBgStyle: { fill: '#ffffff', fillOpacity: 0.9 }, labelBgPadding: [4, 2] as [number, number], labelBgBorderRadius: 3 },
+      { id: 'e-fe-conv2', source: 'conv-node', sourceHandle: 'left', target: 'fe-api', targetHandle: 'left', type: 'smoothstep',
+        style: { stroke: '#6366f1', strokeWidth: 1.5, strokeDasharray: '5,3' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#6366f1', width: 12, height: 12 },
+        label: 'Continue in Ask TriNetra →', labelStyle: { fill: '#6366f1', fontSize: 9, fontWeight: 600 },
+        labelBgStyle: { fill: '#ffffff', fillOpacity: 0.95 }, labelBgPadding: [4, 2] as [number, number], labelBgBorderRadius: 3 },
       { id: 'e-fe-api', source: 'fe-api', sourceHandle: 'bottom', target: 'auth-pipeline', targetHandle: 'top', ...mainFlow,
         label: 'REST API + JWT', labelStyle: { fill: '#475569', fontSize: 10, fontWeight: 600 },
         labelBgStyle: { fill: '#ffffff', fillOpacity: 0.95 }, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 4 },
@@ -1460,17 +1574,17 @@ export default function ArchitecturePage({ onClose }: { onClose?: () => void }) 
       { id: 'e-ol6', source: 'orch-response', target: 'orch-l6', ...internalEdge },
 
       // ── Orchestrator → Intelligence Engines ──
-      { id: 'e-o-nl2sql', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-nl2sql', ...mainFlow },
-      { id: 'e-o-ce', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-ce', ...mainFlow },
-      { id: 'e-o-rag', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-rag', ...mainFlow },
-      { id: 'e-o-pattern', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-pattern', ...mainFlow },
-      { id: 'e-o-network', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-network', ...mainFlow },
-      { id: 'e-o-analytics', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-analytics', ...mainFlow },
-      { id: 'e-o-risk', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-risk', ...mainFlow },
-      { id: 'e-o-financial', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-financial', ...mainFlow },
-      { id: 'e-o-finleads', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-finleads', ...mainFlow },
-      { id: 'e-o-eg', source: 'orch-parallel', sourceHandle: 'bottom', target: 'engine-evidence-graph', ...mainFlow },
-      { id: 'e-o-nba', source: 'orch-nba', sourceHandle: 'bottom', target: 'engine-nba', ...mainFlow },
+      { id: 'e-o-nl2sql', source: 'orch-parallel', sourceHandle: 'bottom', target: 'query-engines', ...mainFlow },
+    { id: 'e-o-ce', source: 'orch-parallel', sourceHandle: 'bottom', target: 'query-engines', ...mainFlow },
+    { id: 'e-o-rag', source: 'orch-parallel', sourceHandle: 'bottom', target: 'query-engines', ...mainFlow },
+    { id: 'e-o-pattern', source: 'orch-parallel', sourceHandle: 'bottom', target: 'pattern-engines', ...mainFlow },
+    { id: 'e-o-network', source: 'orch-parallel', sourceHandle: 'bottom', target: 'network-engines', ...mainFlow },
+    { id: 'e-o-analytics', source: 'orch-parallel', sourceHandle: 'bottom', target: 'analytics-engines', ...mainFlow },
+    { id: 'e-o-risk', source: 'orch-parallel', sourceHandle: 'bottom', target: 'analytics-engines', ...mainFlow },
+    { id: 'e-o-financial', source: 'orch-parallel', sourceHandle: 'bottom', target: 'financial-engines', ...mainFlow },
+    { id: 'e-o-finleads', source: 'orch-parallel', sourceHandle: 'bottom', target: 'financial-engines', ...mainFlow },
+    { id: 'e-o-eg', source: 'orch-parallel', sourceHandle: 'bottom', target: 'support-engines', ...mainFlow },
+    { id: 'e-o-nba', source: 'orch-nba', sourceHandle: 'bottom', target: 'support-engines', ...mainFlow },
 
       // ── Engine → Evidence ──
       { id: 'e-nl-eg', source: 'engine-nl2sql', sourceHandle: 'bottom', target: 'evidence-group', ...dataEdge },

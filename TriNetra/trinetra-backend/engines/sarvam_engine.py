@@ -54,6 +54,47 @@ class SarvamEngine:
         except Exception as e:
             return {"error": f"Sarvam STT failed: {str(e)}"}
 
+    def text_to_speech(self, text: str, language_code: str = "en-IN") -> dict:
+        """
+        Converts text to speech using Sarvam TTS API (bulbul:v2).
+        Returns base64-encoded WAV audio in the ``audios`` list.
+        Supports: en-IN (English), kn-IN (Kannada), etc.
+        """
+        if not self.api_key:
+            return {"error": "Sarvam API key not configured."}
+        if not text or not text.strip():
+            return {"error": "Empty text provided for speech synthesis."}
+        if len(text) > 1500:
+            text = text[:1500].rsplit(" ", 1)[0]
+
+        try:
+            payload = {
+                "text": text,
+                "language_code": language_code,
+                "model": "bulbul:v3",
+                "speaker": "shubh",
+            }
+            response = requests.post(
+                f"{SARVAM_API_BASE}/text-to-speech",
+                headers={**self.headers, "Content-Type": "application/json"},
+                json=payload,
+                timeout=30
+            )
+            if response.status_code != 200:
+                return {"error": f"Sarvam TTS API error: {response.status_code} - {response.text}"}
+            result = response.json()
+            audios = result.get("audios") or []
+            if not audios:
+                return {"error": "Sarvam TTS returned no audio."}
+            return {
+                "status": "success",
+                "audio_base64": "".join(audios),
+                "audio_format": "wav",
+                "language_code": language_code,
+            }
+        except Exception as e:
+            return {"error": f"Sarvam TTS failed: {str(e)}"}
+
     def translate(self, text: str, source_lang: str, target_lang: str) -> dict:
         """
         Translate text between languages using Sarvam Translate API.

@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../context/AuthContext';
+import { ConversationProvider } from '../../context/ConversationContext';
+import VoiceAssistant from '../voice/VoiceAssistant';
 
 const navItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -166,10 +168,15 @@ export default function AppShell() {
           </div>
         </header>
 
-        {/* Page Content */}
-        <main className="flex-1 overflow-auto bg-slate-50/50 relative">
-          <Outlet />
-        </main>
+        {/* Page Content — shared conversation context so AskTriNetra and the
+            Voice Copilot operate on the same persistent investigation
+            conversation. The copilot only renders on authenticated pages. */}
+        <ConversationProvider>
+          <main className="flex-1 overflow-auto bg-slate-50/50 relative">
+            <Outlet />
+          </main>
+          <VoiceAssistant />
+        </ConversationProvider>
       </div>
     </div>
   );
