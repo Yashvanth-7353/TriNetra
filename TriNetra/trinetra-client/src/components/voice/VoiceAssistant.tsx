@@ -26,13 +26,17 @@ type AssistantPresentationMode = 'floating' | 'intro';
 
 /**
  * Intro lifecycle stages:
+ * - 'travel-in': the orb glides from its saved corner position to the center
+ *                while growing to enlarged size. The intro column is mounted
+ *                but hidden during this stage so its orb can be measured for
+ *                a pixel-perfect handoff when the glide ends.
  * - 'center':   enlarged orb + text centered on screen (staggered entrance).
  * - 'exiting':  text fades out while the orb stays centered.
  * - 'travel':   the orb glides from center to the saved corner position
  *               while shrinking to normal size.
  * - 'arrive':   subtle one-shot pulse ring at the corner before settling.
  */
-type IntroStage = 'center' | 'exiting' | 'travel' | 'arrive';
+type IntroStage = 'travel-in' | 'center' | 'exiting' | 'travel' | 'arrive';
 
 interface Position {
   x: number;
@@ -92,7 +96,7 @@ export default function VoiceAssistant() {
   const navigate = useNavigate();
   const { profile, introEligible, consumeIntro } = useAuth();
   const assistant = useVoiceAssistant();
-  const { status, isOpen, lang, isRecording, lastQuery, lastAnswer, lastActions, errorMessage, conversationId, speakIntro } = assistant;
+  const { status, isOpen, lang, isRecording, lastQuery, lastAnswer, lastActions, errorMessage, conversationId, prepareIntro } = assistant;
 
   const [mode, setMode] = useState<AssistantPresentationMode>('floating');
   const [introStage, setIntroStage] = useState<IntroStage>('center');
@@ -149,39 +153,83 @@ export default function VoiceAssistant() {
   /**
    * Automatic intro timeline. All timers are created inside this async flow
    * (not in effect cleanups), so React StrictMode's setup→cleanup→setup cycle
-   * can neither double-start it nor cancel it mid-flight. The speech starts
-   * after an initial delay — deliberately after StrictMode's synchronous
-   * cleanup has finished — so the generation guard in speak() captures a
-   * stable sequence and does NOT discard the intro audio as stale.
+   * can neither double-start it nor cancel it mid-flight. The REAL Sarvam TTS
+   * request starts while the assistant still sits normally in its saved
+   * corner (dashboard fully visible); the center animation begins only when
+   * the audio is genuinely ready to play (canplay) — never on a fixed timer.
+   * The initial `sleep(0)` yields past StrictMode's synchronous cleanup cycle
+   * so the generation guard in the audio preparation captures a stable
+   * sequence and does NOT discard the intro audio as stale.
    */
   const runIntro = useCallback(async () => {
     if (introRunRef.current) return;
     introRunRef.current = true;
 
     const reduced = prefersReducedMotion();
-    setMode('intro');
-    setIntroStage('center');
-    setTraveling(false);
-    setOrbRect(null);
-    setIntroTextIn(false);
 
-    // Phase 1 — entrance: settle + staggered text fade-in.
+    // Phase 0 — silent preparation while the orb stays normal in its corner.
+    // Exactly one TTS request; resolves with the real audio only when it is
+    // ready to play, or null on TTS failure (no intro — orb stays usable).
+    await sleep(0);
+    const prepared = await prepareIntro();
+    if (!prepared || prepared.stale) {
+      // TTS failed, or the user already started an interaction: skip the
+      // intro entirely; the assistant remains the normal floating orb.
+      prepared?.dispose();
+      return;
+    }
+
+    // Phase 1 — audio ready: glide the orb from its saved corner to center.
+    setMode('intro');
+    setIntroTextIn(false);
+    setTraveling(false);
+    const corner = clamp(latestPosRef.current, false);
+    setOrbRect({ left: corner.x, top: corner.y, width: ORB_SIZE, height: ORB_SIZE });
+
+    if (reduced) {
+      // Reduced motion: no travel — the presentation simply appears centered.
+      setIntroStage('center');
+      setOrbRect(null);
+    } else {
+      // The intro column mounts HIDDEN (visibility) so its enlarged orb can
+      // be measured at exactly the rect the traveling orb must arrive at.
+      setIntroStage('travel-in');
+      await new Promise((r) => requestAnimationFrame(r));
+      const orbNode = introOrbRef.current;
+      if (!orbNode) {
+        prepared.dispose();
+        setMode('floating');
+        setOrbRect(null);
+        return;
+      }
+      const r = orbNode.getBoundingClientRect();
+      await sleep(30); // let the corner orb paint before transitioning
+      setTraveling(true);
+      setOrbRect({ left: r.left, top: r.top, width: r.width, height: r.height });
+      await sleep(INTRO_TRAVEL_MS);
+      // Arrival: swap the traveling orb for the now-visible centered column
+      // at the exact same rect (seamless — no jump, no double orb).
+      setIntroStage('center');
+      setOrbRect(null);
+      setTraveling(false);
+    }
+
+    // Phase 2 — entrance: staggered text fade-in once centered.
     requestAnimationFrame(() => setIntroTextIn(true));
     await sleep(750);
 
-    // Phase 2 — speech begins while the intro is fully visible. Resolves when
-    // playback ends; resolves early if TTS fails (visual hold still applies).
-    const speech = speakIntro();
-    await Promise.all([speech, sleep(INTRO_MIN_HOLD_MS)]);
+    // Phase 3 — speak using the ALREADY-prepared audio (no second TTS
+    // request). Resolves when playback ends; resolves early if it fails.
+    await Promise.all([prepared.play(), sleep(INTRO_MIN_HOLD_MS)]);
 
-    // Phase 3 — text fades out; orb stays centered for a beat.
+    // Phase 4 — text fades out; orb stays centered for a beat.
     setIntroTextIn(false);
     await sleep(INTRO_EXIT_MS);
 
-    // Phase 4 — travel the orb from center to the saved corner position while
-    // shrinking it to normal size. Reduced motion skips the travel and drops
-    // straight into the normal floating orb at the corner.
+    // Phase 5 — travel the orb back to the saved corner while shrinking it.
+    // Reduced motion skips the travel and drops into the normal floating orb.
     if (reduced) {
+      prepared.dispose();
       setMode('floating');
       setOrbRect(null);
       return;
@@ -200,17 +248,18 @@ export default function VoiceAssistant() {
     setOrbRect({ left: target.x, top: target.y, width: ORB_SIZE, height: ORB_SIZE });
     await sleep(INTRO_TRAVEL_MS);
 
-    // Phase 5 — subtle arrival pulse at the corner.
+    // Phase 6 — subtle arrival pulse at the corner.
     setIntroStage('arrive');
     await sleep(INTRO_PULSE_MS);
 
-    // Phase 6 — normal floating assistant at the saved position.
+    // Phase 7 — normal floating assistant at the saved position.
+    prepared.dispose();
     setMode('floating');
     setOrbRect(null);
     setTraveling(false);
     setIntroStage('center');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speakIntro]);
+  }, [prepareIntro]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     dragRef.current = {
@@ -262,18 +311,27 @@ export default function VoiceAssistant() {
       Math.round(window.innerWidth * 0.3),
       Math.round(window.innerHeight * 0.3)
     );
-    // The flex column (orb + text card) is visible while centered; it unmounts
-    // exactly when the traveling orb takes over at the measured rect.
+    // The flex column (orb + text card) is visible while centered; it is
+    // mounted-but-hidden during the entry travel so its orb can be measured,
+    // and unmounts exactly when the traveling orb takes over on the return.
     const columnVisible = introStage === 'center' || introStage === 'exiting';
+    const columnHidden = introStage === 'travel-in';
+    const showColumn = columnVisible || columnHidden;
+    // The dim appears with the presentation (and stays through the return
+    // travel); the entry glide happens over the fully visible dashboard.
+    const dimVisible = introStage !== 'travel-in';
 
     return (
       <div className="fixed inset-0 z-50 pointer-events-none" role="presentation">
         {/* Subtle dim — the dashboard stays visibly alive behind the intro. */}
-        <div className="absolute inset-0 bg-primary-900/25" aria-hidden="true" />
+        {dimVisible && <div className="absolute inset-0 bg-primary-900/25" aria-hidden="true" />}
 
         {/* Centered column: enlarged orb, gap, then the readable text card. */}
-        {columnVisible && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center px-4">
+        {showColumn && (
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center px-4"
+            style={{ visibility: columnHidden ? 'hidden' : 'visible' }}
+          >
             {/* Large orb — the assistant's identity, clearly separated from text. */}
             <div
               ref={introOrbRef}

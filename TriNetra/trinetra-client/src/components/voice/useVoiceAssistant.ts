@@ -21,6 +21,20 @@ export type AssistantStatus =
 
 export type AssistantLang = 'EN' | 'KN';
 
+/**
+ * Audio prepared ahead of time (one-shot, no second TTS request).
+ * - `stale` is true when a newer interaction began while the audio was being
+ *   prepared (e.g. the user clicked the orb during preparation) — the caller
+ *   must then skip the introduction entirely.
+ * - `play()` replays the SAME already-synthesized audio (never re-requests).
+ * - `dispose()` releases the element and its listeners.
+ */
+export interface PreparedAudio {
+  stale: boolean;
+  play: () => Promise<void>;
+  dispose: () => void;
+}
+
 export interface VoiceAssistantState {
   status: AssistantStatus;
   isOpen: boolean;
@@ -532,12 +546,139 @@ export function useVoiceAssistant() {
     setLang((prev) => (prev === 'EN' ? 'KN' : 'EN'));
   }, []);
 
-  /** Speaks the one-time onboarding introduction (English). Cached like the
-   *  greeting; failures degrade to a silent intro, never an error state. The
-   *  'intro' trace tag exposes DEV-only end-to-end audio tracing. */
-  const speakIntro = useCallback((): Promise<void> => {
-    return speak(INTRO_SPOKEN_EN, 'en-IN', true, 'intro');
-  }, [speak]);
+  /**
+   * Prepares spoken audio WITHOUT playing it. Performs the real Sarvam TTS
+   * request (one request total — the caller later replays this same audio via
+   * `play()`), caches greetings like `speak()`, and resolves only once the
+   * audio is genuinely ready to play (canplay), not on the HTTP response
+   * alone. Resolves `null` on TTS failure so the caller can stay silent;
+   * resolves `{ stale: true }` if a newer interaction began mid-preparation.
+   */
+  const prepareAudio = useCallback(
+    (text: string, language: string, isGreeting = false, traceTag = ''): Promise<PreparedAudio | null> =>
+      new Promise((resolve) => {
+        // Capture the generation NOW so the prepared audio can never hijack a
+        // real interaction that starts while synthesis is in flight.
+        const gen = seqRef.current;
+        const cacheKey = `${text}|${language}`;
+        const cached = greetingAudioCache.get(cacheKey);
+
+        const buildPrepared = (audio: HTMLAudioElement): PreparedAudio => ({
+          stale: false,
+          play: () =>
+            new Promise((resolvePlay) => {
+              if (seqRef.current !== gen) {
+                // A newer interaction started while the intro audio waited.
+                traceTag && trace(`${traceTag}:audio:stale-discarded`);
+                try { audio.pause(); } catch { /* noop */ }
+                resolvePlay();
+                return;
+              }
+              audioRef.current = audio;
+              const finish = () => {
+                audio.onended = null;
+                audio.onerror = null;
+                audioRef.current = null;
+                resolvePlay();
+              };
+              if (traceTag) {
+                audio.addEventListener('playing', () => trace(`${traceTag}:audio:playing`));
+                audio.addEventListener('ended', () => trace(`${traceTag}:audio:ended`));
+              }
+              audio.onended = finish;
+              audio.onerror = () => {
+                traceTag && trace(`${traceTag}:audio:error`);
+                console.warn('Voice Copilot audio playback failed');
+                finish();
+              };
+              traceTag && trace(`${traceTag}:audio:play`);
+              audio.play().catch(() => {
+                traceTag && trace(`${traceTag}:audio:play-rejected`);
+                console.warn('Voice Copilot playback rejected');
+                finish();
+              });
+            }),
+          dispose: () => {
+            audio.onended = null;
+            audio.onerror = null;
+            try { audio.pause(); } catch { /* noop */ }
+            audio.src = '';
+            if (audioRef.current === audio) audioRef.current = null;
+          },
+        });
+
+        const build = (base64: string) => {
+          if (seqRef.current !== gen) {
+            traceTag && trace(`${traceTag}:stale-discarded`);
+            resolve({ stale: true, play: async () => {}, dispose: () => {} });
+            return;
+          }
+          traceTag && trace(`${traceTag}:audio:created`, { bytes: base64.length });
+          const audio = new Audio(`data:audio/wav;base64,${base64}`);
+          // Readiness = the audio can actually play (canplay), not the HTTP
+          // 200 — the center animation must start from a real playback-ready
+          // event, never a fixed timer.
+          let settled = false;
+          const cleanup = () => {
+            audio.removeEventListener('canplay', onReady);
+            audio.removeEventListener('error', onError);
+          };
+          const onReady = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            traceTag && trace(`${traceTag}:audio:canplay`);
+            resolve(buildPrepared(audio));
+          };
+          const onError = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            console.warn('Voice Copilot intro audio could not be decoded');
+            traceTag && trace(`${traceTag}:audio:error`);
+            resolve(null);
+          };
+          audio.addEventListener('canplay', onReady);
+          audio.addEventListener('error', onError);
+          traceTag && trace(`${traceTag}:audio:load`);
+          audio.load();
+        };
+
+        if (cached) {
+          build(cached);
+          return;
+        }
+        trace('tts:start', { text: text.slice(0, 40) });
+        traceTag && trace(`${traceTag}:tts:request`);
+        synthesizeSpeech(text, language)
+          .then((res) => {
+            trace('tts:success', { bytes: res.audio_base64.length });
+            traceTag && trace(`${traceTag}:tts:success`, { bytes: res.audio_base64.length });
+            if (isGreeting) {
+              greetingAudioCache.set(cacheKey, res.audio_base64);
+            }
+            build(res.audio_base64);
+          })
+          .catch((err) => {
+            // TTS failure: the intro simply never animates; the assistant
+            // stays as the normal floating orb and remains fully usable.
+            console.warn('Voice Copilot TTS failed:', err);
+            trace('tts:failed');
+            traceTag && trace(`${traceTag}:tts:failed`);
+            resolve(null);
+          });
+      }),
+    []
+  );
+
+  /** Speaks the one-time onboarding introduction (English). The audio is
+   *  prepared silently in the corner first; `play()` replays the SAME
+   *  synthesized audio once the introduction is centered — exactly one TTS
+   *  request per login session. Cached like the greeting; failures degrade
+   *  to no intro (normal orb), never an error state. */
+  const prepareIntro = useCallback((): Promise<PreparedAudio | null> => {
+    return prepareAudio(INTRO_SPOKEN_EN, 'en-IN', true, 'intro');
+  }, [prepareAudio]);
 
   // Unmount cleanup: microphone, audio, timers, everything.
   useEffect(() => {
@@ -567,7 +708,7 @@ export function useVoiceAssistant() {
     cancel,
     stopRecording,
     toggleLang,
-    speakIntro,
+    prepareIntro,
     begin: startInteraction,
   };
 }
